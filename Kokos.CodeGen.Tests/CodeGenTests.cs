@@ -128,4 +128,69 @@ public class CodeGenTests
 
         Assert.Equal(3, combine(10, 4, 2));
     }
+
+    [Fact]
+    public void ChooseOldest_shaped_function_picks_the_correct_value_for_both_orderings()
+    {
+        // Structs aren't codegen'd yet (Phase E) — this captures the same two-branch, both-return
+        // shape as the memory-model spec's chooseOldest example, using plain Int parameters instead
+        // of Person structs.
+        using var jit = GenerateAndJit(
+            """
+            function chooseOldest(ageA: Int, ageB: Int): Int {
+                if ageA > ageB {
+                    return ageA;
+                } else {
+                    return ageB;
+                }
+            }
+            """);
+
+        var chooseOldest = jit.GetFunction<BinaryLongFunc>("chooseOldest");
+
+        Assert.Equal(30, chooseOldest(30, 20));
+        Assert.Equal(30, chooseOldest(20, 30));
+    }
+
+    [Fact]
+    public void While_loop_computes_the_correct_running_sum()
+    {
+        using var jit = GenerateAndJit(
+            """
+            function sumUpTo(n: Int): Int {
+                let total = 0;
+                let i = 1;
+                while i <= n {
+                    total = total + i;
+                    i = i + 1;
+                }
+                return total;
+            }
+            """);
+
+        var sumUpTo = jit.GetFunction<UnaryLongFunc>("sumUpTo");
+
+        Assert.Equal(15, sumUpTo(5));
+        Assert.Equal(0, sumUpTo(0));
+    }
+
+    [Fact]
+    public void Ternary_picks_the_correct_branch_in_both_directions()
+    {
+        // The condition is computed and consumed entirely inside the JIT-compiled function — Bool
+        // deliberately never crosses the native/managed call boundary as a parameter or return type
+        // in this test file, since this hand-rolled IR has no Clang-style ABI lowering to guarantee
+        // how a bare i1 argument would be marshaled by a plain delegate call.
+        using var jit = GenerateAndJit(
+            """
+            function pick(flag: Int, a: Int, b: Int): Int {
+                return flag != 0 then a else b;
+            }
+            """);
+
+        var pick = jit.GetFunction<TernaryLongFunc>("pick");
+
+        Assert.Equal(10, pick(1, 10, 20));
+        Assert.Equal(20, pick(0, 10, 20));
+    }
 }

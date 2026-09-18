@@ -34,6 +34,12 @@ public class TokenizerTests
     [InlineData("value")]
     [InlineData("length")]
     [InlineData("terminated")]
+    [InlineData("if")]
+    [InlineData("else")]
+    [InlineData("while")]
+    [InlineData("then")]
+    [InlineData("true")]
+    [InlineData("false")]
     public void Recognizes_keyword(string text)
     {
         var tokens = new KokosTokenizer(text).Tokenize();

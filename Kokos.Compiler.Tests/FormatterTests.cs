@@ -238,4 +238,111 @@ public class FormatterTests
             """,
             KokosFormatter.Format(unit));
     }
+
+    [Fact]
+    public void Normalizes_if_else_spacing_and_indentation()
+    {
+        var unit = KokosParser.Parse(
+            "function f(x:Int):Int{if   x>0{return 1;}else{return 2;}}",
+            out var diagnostics);
+        Assert.False(diagnostics.HasErrors);
+
+        Assert.Equal(
+            """
+            function f(x: Int): Int {
+                if x > 0 {
+                    return 1;
+                } else {
+                    return 2;
+                }
+            }
+
+            """,
+            KokosFormatter.Format(unit));
+    }
+
+    [Fact]
+    public void Formats_else_if_chain_inline_rather_than_nested()
+    {
+        var unit = KokosParser.Parse(
+            """
+            function f(x: Int): Int {
+                if x > 0 {
+                    return 1;
+                } else if x < 0 {
+                    return 2;
+                } else {
+                    return 0;
+                }
+            }
+            """,
+            out var diagnostics);
+        Assert.False(diagnostics.HasErrors);
+
+        Assert.Equal(
+            """
+            function f(x: Int): Int {
+                if x > 0 {
+                    return 1;
+                } else if x < 0 {
+                    return 2;
+                } else {
+                    return 0;
+                }
+            }
+
+            """,
+            KokosFormatter.Format(unit));
+    }
+
+    [Fact]
+    public void Normalizes_while_spacing()
+    {
+        var unit = KokosParser.Parse("function f(n:Int):Int{while   n>0{n=n-1;}return n;}", out var diagnostics);
+        Assert.False(diagnostics.HasErrors);
+
+        Assert.Equal(
+            """
+            function f(n: Int): Int {
+                while n > 0 {
+                    n = n - 1;
+                }
+                return n;
+            }
+
+            """,
+            KokosFormatter.Format(unit));
+    }
+
+    [Fact]
+    public void Formats_ternary_conditional_expression()
+    {
+        var unit = KokosParser.Parse("function f(cond:Bool):Int{return cond   then   1   else   2;}", out var diagnostics);
+        Assert.False(diagnostics.HasErrors);
+
+        Assert.Equal(
+            """
+            function f(cond: Bool): Int {
+                return cond then 1 else 2;
+            }
+
+            """,
+            KokosFormatter.Format(unit));
+    }
+
+    [Fact]
+    public void Formats_true_false_and_logical_not()
+    {
+        var unit = KokosParser.Parse("function f(flag:Bool):Bool{return !flag||true&&false;}", out var diagnostics);
+        Assert.False(diagnostics.HasErrors);
+
+        Assert.Equal(
+            """
+            function f(flag: Bool): Bool {
+                return !flag || true && false;
+            }
+
+            """,
+            KokosFormatter.Format(unit));
+    }
 }

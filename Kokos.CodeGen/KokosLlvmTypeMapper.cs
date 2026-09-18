@@ -24,6 +24,7 @@ public sealed class KokosLlvmTypeMapper
     public LLVMTypeRef Map(KokosType type) => type switch
     {
         KokosPrimitiveType primitive => MapPrimitive(primitive),
+        KokosBoolType => _context.Int1Type,
         KokosAliasType alias => Map(alias.UnderlyingType),
 
         _ => throw new NotSupportedException(

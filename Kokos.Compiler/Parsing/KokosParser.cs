@@ -297,8 +297,40 @@ public sealed class KokosParser
     {
         TokenKind.LetKeyword => ParseVarDecl(),
         TokenKind.ReturnKeyword => ParseReturn(),
+        TokenKind.IfKeyword => ParseIfStatement(),
+        TokenKind.WhileKeyword => ParseWhileStatement(),
         _ => ParseExpressionStatement(),
     };
+
+    /// <summary>
+    /// No parens around the condition: unambiguous against the following '{' since Kokos has no
+    /// struct/object literal expression syntax that could itself start consuming one.
+    /// </summary>
+    private KokosIfStatementNode ParseIfStatement()
+    {
+        var ifKeyword = Advance();
+        var condition = ParseExpression();
+        var thenBlock = ParseBlock();
+
+        KokosToken? elseKeyword = null;
+        KokosNode? elseBody = null;
+        if (Current.Kind == TokenKind.ElseKeyword)
+        {
+            elseKeyword = Advance();
+            // 'else if' is just a nested if-statement here — no separate grammar rule needed.
+            elseBody = Current.Kind == TokenKind.IfKeyword ? ParseIfStatement() : ParseBlock();
+        }
+
+        return new KokosIfStatementNode(ifKeyword, condition, thenBlock, elseKeyword, elseBody);
+    }
+
+    private KokosWhileStatementNode ParseWhileStatement()
+    {
+        var whileKeyword = Advance();
+        var condition = ParseExpression();
+        var body = ParseBlock();
+        return new KokosWhileStatementNode(whileKeyword, condition, body);
+    }
 
     private KokosVarDeclNode ParseVarDecl()
     {
@@ -342,7 +374,7 @@ public sealed class KokosParser
 
     private KokosExpressionNode ParseAssignment()
     {
-        var left = ParseLogicalOr();
+        var left = ParseConditional();
 
         if (Current.Kind == TokenKind.Equals && left is KokosIdentifierNode or KokosMemberAccessNode)
         {
@@ -352,6 +384,22 @@ public sealed class KokosParser
         }
 
         return left;
+    }
+
+    /// <summary>The ternary: <c>condition then trueValue else falseValue</c>. Right-associative, sits between assignment and logical-or.</summary>
+    private KokosExpressionNode ParseConditional()
+    {
+        var condition = ParseLogicalOr();
+
+        if (Current.Kind != TokenKind.ThenKeyword)
+            return condition;
+
+        var thenKeyword = Advance();
+        var trueValue = ParseConditional();
+        var elseKeyword = Expect(TokenKind.ElseKeyword, "'else'");
+        var falseValue = ParseConditional();
+
+        return new KokosConditionalExpressionNode(condition, thenKeyword, trueValue, elseKeyword, falseValue);
     }
 
     private KokosExpressionNode ParseLogicalOr() =>
@@ -448,6 +496,12 @@ public sealed class KokosParser
 
             case TokenKind.StringLiteral:
                 return new KokosLiteralStringNode(Advance());
+
+            case TokenKind.TrueKeyword:
+                return new KokosLiteralBoolNode(Advance(), true);
+
+            case TokenKind.FalseKeyword:
+                return new KokosLiteralBoolNode(Advance(), false);
 
             case TokenKind.OpenParen:
             {

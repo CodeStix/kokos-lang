@@ -194,6 +194,11 @@ public sealed class KokosTypeResolver : IKokosVisitor<KokosType>
 
     public KokosType VisitNamedType(KokosNamedTypeNode node)
     {
+        // Bool is a nameable builtin type (so `function f(): Bool` resolves) but deliberately not
+        // part of the KokosPrimitiveType lookup table — see KokosBoolType's own doc comment for why.
+        if (node.Name == "Bool")
+            return KokosBoolType.Instance;
+
         if (KokosPrimitiveType.TryLookup(node.Name, out var primitive))
             return primitive;
 
@@ -246,9 +251,13 @@ public sealed class KokosTypeResolver : IKokosVisitor<KokosType>
     public KokosType VisitVarDecl(KokosVarDeclNode node) => throw NotAType(nameof(KokosVarDeclNode));
     public KokosType VisitReturn(KokosReturnNode node) => throw NotAType(nameof(KokosReturnNode));
     public KokosType VisitExpressionStatement(KokosExpressionStatementNode node) => throw NotAType(nameof(KokosExpressionStatementNode));
+    public KokosType VisitIfStatement(KokosIfStatementNode node) => throw NotAType(nameof(KokosIfStatementNode));
+    public KokosType VisitWhileStatement(KokosWhileStatementNode node) => throw NotAType(nameof(KokosWhileStatementNode));
     public KokosType VisitIdentifier(KokosIdentifierNode node) => throw NotAType(nameof(KokosIdentifierNode));
     public KokosType VisitLiteralNumber(KokosLiteralNumberNode node) => throw NotAType(nameof(KokosLiteralNumberNode));
     public KokosType VisitLiteralString(KokosLiteralStringNode node) => throw NotAType(nameof(KokosLiteralStringNode));
+    public KokosType VisitLiteralBool(KokosLiteralBoolNode node) => throw NotAType(nameof(KokosLiteralBoolNode));
+    public KokosType VisitConditionalExpression(KokosConditionalExpressionNode node) => throw NotAType(nameof(KokosConditionalExpressionNode));
     public KokosType VisitMathOperator(KokosMathOperatorNode node) => throw NotAType(nameof(KokosMathOperatorNode));
     public KokosType VisitUnaryOperator(KokosUnaryOperatorNode node) => throw NotAType(nameof(KokosUnaryOperatorNode));
     public KokosType VisitAssignment(KokosAssignmentNode node) => throw NotAType(nameof(KokosAssignmentNode));

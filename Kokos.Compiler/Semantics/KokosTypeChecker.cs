@@ -17,12 +17,12 @@ namespace Kokos.Compiler.Semantics;
 /// </summary>
 public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
 {
-    private static readonly HashSet<TokenKind> ComparisonOrLogicalOperators =
-    [
-        TokenKind.EqualsEquals, TokenKind.BangEquals,
-        TokenKind.Less, TokenKind.LessEquals, TokenKind.Greater, TokenKind.GreaterEquals,
-        TokenKind.AmpAmp, TokenKind.PipePipe,
-    ];
+    private static readonly HashSet<TokenKind> EqualityOperators = [TokenKind.EqualsEquals, TokenKind.BangEquals];
+
+    private static readonly HashSet<TokenKind> RelationalOperators =
+        [TokenKind.Less, TokenKind.LessEquals, TokenKind.Greater, TokenKind.GreaterEquals];
+
+    private static readonly HashSet<TokenKind> LogicalOperators = [TokenKind.AmpAmp, TokenKind.PipePipe];
 
     private readonly KokosDeclarationTable _table;
     private readonly KokosTypeResolver _resolver;
@@ -170,6 +170,15 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         {
             node.Body.Accept(this);
             var effectiveReturnType = _currentDeclaredReturnType ?? InferReturnType(node, _currentReturnTypes);
+
+            // A function stays implicitly void-like (no requirement) only when it has neither a
+            // declared return type nor any return-with-a-value anywhere in its body.
+            var mustDefinitelyReturn = _currentDeclaredReturnType is not null || _currentReturnTypes.Count > 0;
+            if (mustDefinitelyReturn && !AlwaysReturns(node.Body))
+            {
+                _diagnostics.ReportError(node.NameToken.Span, $"Not all code paths in '{node.Name}' return a value.");
+            }
+
             return new KokosFunctionType(parameterTypes, effectiveReturnType, node);
         }
         finally
@@ -266,6 +275,51 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
 
     public KokosType VisitExpressionStatement(KokosExpressionStatementNode node) => TypeOf(node.Expression);
 
+    public KokosType VisitIfStatement(KokosIfStatementNode node)
+    {
+        CheckCondition(node.Condition);
+        node.ThenBlock.Accept(this);
+        node.ElseBody?.Accept(this);
+        return KokosUnknownType.Instance;
+    }
+
+    public KokosType VisitWhileStatement(KokosWhileStatementNode node)
+    {
+        CheckCondition(node.Condition);
+        node.Body.Accept(this);
+        return KokosUnknownType.Instance;
+    }
+
+    private void CheckCondition(KokosExpressionNode condition)
+    {
+        var conditionType = CheckExpression(condition, KokosBoolType.Instance);
+        if (conditionType is not (KokosBoolType or KokosUnknownType or KokosErrorType))
+        {
+            _diagnostics.ReportError(SpanOf(condition),
+                $"A condition must be 'Bool', but got '{conditionType.DisplayName}'.");
+        }
+    }
+
+    /// <summary>
+    /// Whether executing this statement is guaranteed to hit a <c>return</c> — invisible before
+    /// branching existed (a straight-line body either had a return statement or didn't); real once
+    /// <c>if</c>/<c>while</c> exist. A block "always returns" if *any* of its statements does (in
+    /// order — matches the checker's existing tolerance for dead code after a return). A
+    /// <see cref="KokosWhileStatementNode"/> is always <c>false</c>, deliberately conservative: proving
+    /// a loop always executes and always returns needs constant-condition reasoning this pass doesn't
+    /// attempt, so `while true { return 1; }` is treated as "might not return" — a disclosed
+    /// limitation, not a silent gap.
+    /// </summary>
+    private static bool AlwaysReturns(KokosNode statement) => statement switch
+    {
+        KokosReturnNode => true,
+        KokosBlockNode block => block.Statements.Any(AlwaysReturns),
+        KokosIfStatementNode ifStatement => ifStatement.ElseBody is not null
+            && AlwaysReturns(ifStatement.ThenBlock)
+            && AlwaysReturns(ifStatement.ElseBody),
+        _ => false,
+    };
+
     // --- Expressions ---------------------------------------------------------------------------------
 
     public KokosType VisitIdentifier(KokosIdentifierNode node)
@@ -301,31 +355,76 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         // are deliberately left unchecked rather than guessing.
         KokosUnknownType.Instance;
 
+    public KokosType VisitLiteralBool(KokosLiteralBoolNode node) => KokosBoolType.Instance;
+
     public KokosType VisitMathOperator(KokosMathOperatorNode node)
     {
         var left = TypeOf(node.Left);
         var right = TypeOf(node.Right);
+        var op = node.OperatorToken.Kind;
 
         if (left is KokosUnknownType || right is KokosUnknownType)
             return KokosUnknownType.Instance;
         if (left is KokosErrorType || right is KokosErrorType)
             return KokosErrorType.Instance;
 
-        // No numeric-widening/promotion lattice is specified anywhere in the type-system spec, so
-        // this requires an exact match rather than inventing one — contextual typing (both operands
-        // see the same ambient expected type from any enclosing let/return/parameter) is what makes
-        // same-typed operands the common case in practice.
-        var operandsCompatible = left is KokosPrimitiveType && ReferenceEquals(left, right);
-        if (!operandsCompatible)
+        // Logical operators require both operands to already be Bool.
+        if (LogicalOperators.Contains(op))
         {
-            _diagnostics.ReportError(node.OperatorToken.Span,
-                $"Operator '{node.OperatorToken.Text}' cannot be applied to operands of type '{left.DisplayName}' and '{right.DisplayName}'.");
+            if (left is KokosBoolType && right is KokosBoolType)
+                return KokosBoolType.Instance;
+
+            ReportOperatorMismatch(node, left, right);
             return KokosErrorType.Instance;
         }
 
-        // The spec defines no boolean primitive, so comparison/logical operators are checked for
-        // operand compatibility but their result is Unknown rather than a fabricated Bool type.
-        return ComparisonOrLogicalOperators.Contains(node.OperatorToken.Kind) ? KokosUnknownType.Instance : left;
+        // Equality accepts any two same-typed operands — numeric or Bool.
+        if (EqualityOperators.Contains(op))
+        {
+            if ((left is KokosPrimitiveType or KokosBoolType) && ReferenceEquals(left, right))
+                return KokosBoolType.Instance;
+
+            ReportOperatorMismatch(node, left, right);
+            return KokosErrorType.Instance;
+        }
+
+        // Arithmetic and relational both require the same numeric primitive on both sides — no
+        // numeric-widening/promotion lattice is specified anywhere in the type-system spec, so this
+        // requires an exact match rather than inventing one (contextual typing, where both operands
+        // see the same ambient expected type from any enclosing let/return/parameter, is what makes
+        // same-typed operands the common case in practice). They only differ in their result: the
+        // shared operand type itself for arithmetic, Bool for relational.
+        if (left is KokosPrimitiveType && ReferenceEquals(left, right))
+            return RelationalOperators.Contains(op) ? KokosBoolType.Instance : left;
+
+        ReportOperatorMismatch(node, left, right);
+        return KokosErrorType.Instance;
+    }
+
+    private void ReportOperatorMismatch(KokosMathOperatorNode node, KokosType left, KokosType right) =>
+        _diagnostics.ReportError(node.OperatorToken.Span,
+            $"Operator '{node.OperatorToken.Text}' cannot be applied to operands of type '{left.DisplayName}' and '{right.DisplayName}'.");
+
+    public KokosType VisitConditionalExpression(KokosConditionalExpressionNode node)
+    {
+        CheckCondition(node.Condition);
+
+        var trueType = TypeOf(node.TrueValue);
+        var falseType = TypeOf(node.FalseValue);
+
+        if (trueType is KokosUnknownType || falseType is KokosUnknownType)
+            return KokosUnknownType.Instance;
+        if (trueType is KokosErrorType || falseType is KokosErrorType)
+            return KokosErrorType.Instance;
+
+        if (!ReferenceEquals(trueType, falseType))
+        {
+            _diagnostics.ReportError(node.ThenKeyword.Span,
+                $"The branches of a conditional expression must produce the same type, but got '{trueType.DisplayName}' and '{falseType.DisplayName}'.");
+            return KokosErrorType.Instance;
+        }
+
+        return trueType;
     }
 
     public KokosType VisitUnaryOperator(KokosUnaryOperatorNode node)
@@ -336,7 +435,14 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             return operandType;
 
         if (node.OperatorToken.Kind == TokenKind.Bang)
-            return KokosUnknownType.Instance; // no boolean primitive, see VisitMathOperator
+        {
+            if (operandType is KokosBoolType)
+                return KokosBoolType.Instance;
+
+            _diagnostics.ReportError(node.OperatorToken.Span,
+                $"Operator '!' cannot be applied to an operand of type '{operandType.DisplayName}'.");
+            return KokosErrorType.Instance;
+        }
 
         if (operandType is KokosPrimitiveType)
             return operandType;

@@ -22,9 +22,13 @@ public interface IKokosVisitor<out T>
     T VisitVarDecl(KokosVarDeclNode node);
     T VisitReturn(KokosReturnNode node);
     T VisitExpressionStatement(KokosExpressionStatementNode node);
+    T VisitIfStatement(KokosIfStatementNode node);
+    T VisitWhileStatement(KokosWhileStatementNode node);
     T VisitIdentifier(KokosIdentifierNode node);
     T VisitLiteralNumber(KokosLiteralNumberNode node);
     T VisitLiteralString(KokosLiteralStringNode node);
+    T VisitLiteralBool(KokosLiteralBoolNode node);
+    T VisitConditionalExpression(KokosConditionalExpressionNode node);
     T VisitMathOperator(KokosMathOperatorNode node);
     T VisitUnaryOperator(KokosUnaryOperatorNode node);
     T VisitAssignment(KokosAssignmentNode node);

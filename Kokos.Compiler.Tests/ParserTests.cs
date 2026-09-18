@@ -369,4 +369,139 @@ public class ParserTests
         var varDecl = Assert.IsType<KokosVarDeclNode>(unit.Functions[0].Body.Statements[0]);
         Assert.Null(varDecl.Type);
     }
+
+    [Fact]
+    public void Parses_if_with_no_parens_around_the_condition()
+    {
+        var unit = KokosParser.Parse("function f(x: Int): Int { if x > 0 { return x; } return 0; }", out var diagnostics);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+
+        var ifStatement = Assert.IsType<KokosIfStatementNode>(unit.Functions[0].Body.Statements[0]);
+        Assert.IsType<KokosMathOperatorNode>(ifStatement.Condition);
+        Assert.Single(ifStatement.ThenBlock.Statements);
+        Assert.Null(ifStatement.ElseKeyword);
+        Assert.Null(ifStatement.ElseBody);
+    }
+
+    [Fact]
+    public void Parses_if_else()
+    {
+        var unit = KokosParser.Parse(
+            "function f(x: Int): Int { if x > 0 { return 1; } else { return 2; } }",
+            out var diagnostics);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+
+        var ifStatement = Assert.IsType<KokosIfStatementNode>(unit.Functions[0].Body.Statements[0]);
+        Assert.NotNull(ifStatement.ElseKeyword);
+        Assert.IsType<KokosBlockNode>(ifStatement.ElseBody);
+    }
+
+    [Fact]
+    public void Parses_else_if_chain_as_a_nested_if_statement()
+    {
+        var unit = KokosParser.Parse(
+            """
+            function f(x: Int): Int {
+                if x > 0 {
+                    return 1;
+                } else if x < 0 {
+                    return 2;
+                } else {
+                    return 3;
+                }
+            }
+            """,
+            out var diagnostics);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+
+        var outerIf = Assert.IsType<KokosIfStatementNode>(unit.Functions[0].Body.Statements[0]);
+        var elseIf = Assert.IsType<KokosIfStatementNode>(outerIf.ElseBody);
+        Assert.IsType<KokosMathOperatorNode>(elseIf.Condition);
+        Assert.IsType<KokosBlockNode>(elseIf.ElseBody);
+    }
+
+    [Fact]
+    public void Parses_chooseOldest_shape_with_two_returning_branches()
+    {
+        const string source = """
+            function chooseOldest(a: Person, b: Person): Person {
+                if a.age > b.age {
+                    return a;
+                } else {
+                    return b;
+                }
+            }
+            """;
+
+        var unit = KokosParser.Parse(source, out var diagnostics);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+
+        var ifStatement = Assert.IsType<KokosIfStatementNode>(unit.Functions[0].Body.Statements[0]);
+        var thenReturn = Assert.IsType<KokosReturnNode>(ifStatement.ThenBlock.Statements[0]);
+        Assert.IsType<KokosIdentifierNode>(thenReturn.Expression);
+    }
+
+    [Fact]
+    public void Parses_while_with_no_parens_around_the_condition()
+    {
+        var unit = KokosParser.Parse(
+            "function f(n: Int): Int { while n > 0 { n = n - 1; } return n; }",
+            out var diagnostics);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+
+        var whileStatement = Assert.IsType<KokosWhileStatementNode>(unit.Functions[0].Body.Statements[0]);
+        Assert.IsType<KokosMathOperatorNode>(whileStatement.Condition);
+        Assert.Single(whileStatement.Body.Statements);
+    }
+
+    [Fact]
+    public void Parses_ternary_conditional_expression()
+    {
+        var unit = KokosParser.Parse(
+            "function f(cond: Bool): Int { return cond then 1 else 2; }",
+            out var diagnostics);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+
+        var returnStatement = Assert.IsType<KokosReturnNode>(unit.Functions[0].Body.Statements[0]);
+        var conditional = Assert.IsType<KokosConditionalExpressionNode>(returnStatement.Expression);
+        Assert.IsType<KokosIdentifierNode>(conditional.Condition);
+        Assert.IsType<KokosLiteralNumberNode>(conditional.TrueValue);
+        Assert.IsType<KokosLiteralNumberNode>(conditional.FalseValue);
+    }
+
+    [Fact]
+    public void Ternary_is_right_associative_and_binds_looser_than_logical_or()
+    {
+        var unit = KokosParser.Parse(
+            "function f(a: Bool, b: Bool): Int { return a || b then 1 else 2; }",
+            out var diagnostics);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+
+        var returnStatement = Assert.IsType<KokosReturnNode>(unit.Functions[0].Body.Statements[0]);
+        var conditional = Assert.IsType<KokosConditionalExpressionNode>(returnStatement.Expression);
+        // "a || b" must have been consumed entirely as the condition (logical-or binds tighter).
+        Assert.IsType<KokosMathOperatorNode>(conditional.Condition);
+    }
+
+    [Fact]
+    public void Parses_true_and_false_literals()
+    {
+        var unit = KokosParser.Parse("function f(): Bool { return true; }", out var diagnostics);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+
+        var returnStatement = Assert.IsType<KokosReturnNode>(unit.Functions[0].Body.Statements[0]);
+        var literal = Assert.IsType<KokosLiteralBoolNode>(returnStatement.Expression);
+        Assert.True(literal.Value);
+    }
+
+    [Fact]
+    public void Parses_logical_not()
+    {
+        var unit = KokosParser.Parse("function f(flag: Bool): Bool { return !flag; }", out var diagnostics);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+
+        var returnStatement = Assert.IsType<KokosReturnNode>(unit.Functions[0].Body.Statements[0]);
+        var unary = Assert.IsType<KokosUnaryOperatorNode>(returnStatement.Expression);
+        Assert.Equal("!", unary.OperatorToken.Text);
+    }
 }

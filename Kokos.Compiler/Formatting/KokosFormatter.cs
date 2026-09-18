@@ -142,11 +142,28 @@ public sealed class KokosFormatter : IKokosVisitor<string>
 
     public string VisitExpressionStatement(KokosExpressionStatementNode node) => $"{node.Expression.Accept(this)};";
 
+    public string VisitIfStatement(KokosIfStatementNode node)
+    {
+        var result = $"if {node.Condition.Accept(this)} {node.ThenBlock.Accept(this)}";
+
+        if (node.ElseBody is null)
+            return result;
+
+        // A nested if (an 'else if' chain) already renders as "if cond { } ...", so prefixing it
+        // with "else " here is what produces "else if cond { } ..." — no separate case needed.
+        return $"{result} else {node.ElseBody.Accept(this)}";
+    }
+
+    public string VisitWhileStatement(KokosWhileStatementNode node) =>
+        $"while {node.Condition.Accept(this)} {node.Body.Accept(this)}";
+
     public string VisitIdentifier(KokosIdentifierNode node) => node.Name;
 
     // Literals are printed from the token's original spelling rather than reformatting node.Value,
     // so e.g. numeric formatting (1 vs 1.0) is left exactly as the author wrote it.
     public string VisitLiteralNumber(KokosLiteralNumberNode node) => node.Token.Text;
+
+    public string VisitLiteralBool(KokosLiteralBoolNode node) => node.Token.Text;
 
     public string VisitLiteralString(KokosLiteralStringNode node) => node.Token.Text;
 
@@ -171,4 +188,7 @@ public sealed class KokosFormatter : IKokosVisitor<string>
         node.Name is null ? node.Expression.Accept(this) : $"{node.Name}: {node.Expression.Accept(this)}";
 
     public string VisitParenthesized(KokosParenthesizedExpressionNode node) => $"({node.Expression.Accept(this)})";
+
+    public string VisitConditionalExpression(KokosConditionalExpressionNode node) =>
+        $"{node.Condition.Accept(this)} then {node.TrueValue.Accept(this)} else {node.FalseValue.Accept(this)}";
 }

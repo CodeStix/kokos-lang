@@ -92,6 +92,34 @@ public class RoundTripTests
             """];
         yield return ["function readBuffer(device: Device) { return device.read(); } // return type inferred as [UInt8]"];
         yield return ["function f(v: Ip): Int8 { return v.0; }"];
+
+        // Phase B: if/else, while, ternary, comparisons/logical operators, no-parens conditions.
+        yield return ["""
+            function chooseOldest(a: Person, b: Person): Person {
+                if a.age > b.age {
+                    return a;
+                } else {
+                    return b;
+                }
+            }
+            """];
+        yield return ["""
+            function classify(x: Int): Int {
+                if x > 0 {
+                    return 1;
+                } else if x < 0 {
+                    return 2;
+                } else {
+                    return 0;
+                }
+            }
+            """];
+        yield return ["function f(n: Int): Int { while n > 0 { n = n - 1; } return n; }"];
+        yield return ["function f(cond: Bool): Int { return cond then 1 else 2; }"];
+        yield return ["function f(a: Bool, b: Bool): Bool { return a && b || !a; }"];
+        yield return ["function f(): Bool { return true; }"];
+        yield return ["function f(): Bool { return false; }"];
+        yield return ["function f(a: Int, b: Int): Bool { return a == b && a != b || a >= b; }"];
     }
 
     [Theory]

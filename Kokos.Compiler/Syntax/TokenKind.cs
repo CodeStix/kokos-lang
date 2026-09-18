@@ -20,6 +20,12 @@ public enum TokenKind
     ValueKeyword,
     LengthKeyword,
     TerminatedKeyword,
+    IfKeyword,
+    ElseKeyword,
+    WhileKeyword,
+    ThenKeyword,
+    TrueKeyword,
+    FalseKeyword,
 
     // Punctuation
     OpenParen,

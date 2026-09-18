@@ -75,14 +75,188 @@ public class TypeCheckerTests
     }
 
     [Fact]
-    public void Comparison_operator_result_is_unknown_since_there_is_no_boolean_primitive()
+    public void Comparison_operator_produces_Bool()
     {
-        var (unit, _, checker, diagnostics) = Setup("function f(a: Int, b: Int) { let x = a == b; }");
+        var (unit, _, checker, diagnostics) = Setup("function f(a: Int, b: Int): Bool { return a == b; }");
+        var functionType = CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+        Assert.Same(KokosBoolType.Instance, functionType.ReturnType);
+    }
+
+    [Fact]
+    public void Relational_operator_on_mismatched_operand_types_is_a_diagnostic()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f(a: Int, b: Float64) { let x = a < b; }");
         CheckFunction(checker, unit);
 
-        // No diagnostic for the comparison itself (operands match); there's just nothing typed
-        // "Bool" to assign to x, since the spec defines no boolean primitive.
-        Assert.False(diagnostics.HasErrors);
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Equality_accepts_matching_bool_operands()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f(a: Bool, b: Bool): Bool { return a == b; }");
+        var functionType = CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+        Assert.Same(KokosBoolType.Instance, functionType.ReturnType);
+    }
+
+    [Fact]
+    public void Logical_operator_requires_bool_operands()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f(a: Bool, b: Bool): Bool { return a && b || a; }");
+        var functionType = CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+        Assert.Same(KokosBoolType.Instance, functionType.ReturnType);
+    }
+
+    [Fact]
+    public void Logical_operator_on_non_bool_operand_is_a_diagnostic()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f(a: Int, b: Int) { let x = a && b; }");
+        CheckFunction(checker, unit);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Logical_not_requires_bool_and_produces_bool()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f(flag: Bool): Bool { return !flag; }");
+        var functionType = CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+        Assert.Same(KokosBoolType.Instance, functionType.ReturnType);
+    }
+
+    [Fact]
+    public void Logical_not_on_non_bool_operand_is_a_diagnostic()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f(x: Int) { let y = !x; }");
+        CheckFunction(checker, unit);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    // --- if / while / ternary --------------------------------------------------------------------
+
+    [Fact]
+    public void True_and_false_literals_are_Bool()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f(): Bool { return true; }");
+        var functionType = CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+        Assert.Same(KokosBoolType.Instance, functionType.ReturnType);
+    }
+
+    [Fact]
+    public void If_condition_must_be_bool()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f(x: Int) { if x { } }");
+        CheckFunction(checker, unit);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void While_condition_must_be_bool()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f(x: Int) { while x { } }");
+        CheckFunction(checker, unit);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void ChooseOldest_shaped_function_with_both_branches_returning_type_checks_cleanly()
+    {
+        const string source = """
+            struct Person { age: Int }
+
+            function chooseOldest(a: Person, b: Person): Person {
+                if a.age > b.age {
+                    return a;
+                } else {
+                    return b;
+                }
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[1]);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Function_with_an_if_missing_its_else_does_not_definitely_return()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f(x: Int): Int { if x > 0 { return 1; } }");
+        CheckFunction(checker, unit);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void While_loop_containing_a_guaranteed_return_still_is_not_considered_definite()
+    {
+        // Deliberately conservative: this pass doesn't reason about constant conditions, so
+        // `while true { return x; }` is treated as "might not return" even though it always does.
+        var (unit, _, checker, diagnostics) = Setup("function f(x: Int): Int { while true { return x; } }");
+        CheckFunction(checker, unit);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Function_with_if_else_and_a_trailing_return_type_checks_cleanly()
+    {
+        var (unit, _, checker, diagnostics) = Setup(
+            "function f(x: Int): Int { while x > 0 { x = x - 1; } return x; }");
+        CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Ternary_branches_must_produce_the_same_type()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f(cond: Bool): Int { return cond then 1 else 2; }");
+        var functionType = CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+        Assert.Same(KokosPrimitiveType.Int, functionType.ReturnType);
+    }
+
+    [Fact]
+    public void Ternary_with_mismatched_branch_types_is_a_diagnostic()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f(cond: Bool) { let x = cond then 1 else 2.5; }");
+        CheckFunction(checker, unit);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Ternary_condition_must_be_bool()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f(x: Int) { let y = x then 1 else 2; }");
+        CheckFunction(checker, unit);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Ternary_propagates_contextual_typing_into_both_branches()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f(cond: Bool): Int8 { let x: Int8 = cond then 1 else 2; return x; }");
+        CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
     }
 
     // --- Contextual typing -----------------------------------------------------------------------

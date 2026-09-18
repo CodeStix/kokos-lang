@@ -25,6 +25,12 @@ public sealed class KokosTokenizer
         ["value"] = TokenKind.ValueKeyword,
         ["length"] = TokenKind.LengthKeyword,
         ["terminated"] = TokenKind.TerminatedKeyword,
+        ["if"] = TokenKind.IfKeyword,
+        ["else"] = TokenKind.ElseKeyword,
+        ["while"] = TokenKind.WhileKeyword,
+        ["then"] = TokenKind.ThenKeyword,
+        ["true"] = TokenKind.TrueKeyword,
+        ["false"] = TokenKind.FalseKeyword,
     };
 
     private readonly string _source;

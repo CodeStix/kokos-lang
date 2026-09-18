@@ -16,7 +16,7 @@ namespace Kokos.CodeGen;
 /// already-run <see cref="KokosTypeChecker"/> passed into the constructor
 /// (<see cref="KokosTypeChecker.FunctionTypes"/> and <see cref="KokosTypeChecker.ExpressionTypes"/>).
 ///
-/// Structs, enums, arrays, optionals, unions, member access/calls, and unary operators all throw
+/// Structs, enums, arrays, optionals, unions, and member access/calls all throw
 /// <see cref="NotSupportedException"/> — they need an allocation strategy that's entangled with the
 /// ownership work (a later phase), so it isn't guessed at here.
 /// </summary>
@@ -29,6 +29,18 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     private readonly LLVMBuilderRef _builder;
 
     private Dictionary<string, (LLVMValueRef Pointer, LLVMTypeRef Type)> _scope = new();
+    private LLVMValueRef _currentFunction;
+
+    /// <summary>
+    /// Tracks whether the block currently being generated into already ends in a terminator (a
+    /// <c>return</c>, or a branch this generator itself emitted) — set by <see cref="BuildRet"/>/
+    /// <see cref="BuildRetVoid"/>/<see cref="BuildBr"/>/<see cref="BuildCondBr"/>, cleared by
+    /// <see cref="PositionAtEnd"/>. Deciding whether an if/while branch needs an explicit branch to
+    /// its successor block (versus having already returned) only needs this — no LLVM
+    /// block-introspection API required, since this generator already controls every
+    /// terminator-emitting call site directly.
+    /// </summary>
+    private bool _blockTerminated;
 
     /// <summary>
     /// Every generator gets its own fresh context rather than sharing <c>LLVMContextRef.Global</c> —
@@ -58,6 +70,38 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
 
     private LLVMTypeRef MapFunctionSignature(KokosFunctionType functionType) =>
         LLVMTypeRef.CreateFunction(_typeMapper.Map(functionType.ReturnType), functionType.ParameterTypes.Select(_typeMapper.Map).ToArray());
+
+    // --- Terminator-tracking wrappers (see _blockTerminated) --------------------------------------
+
+    private void PositionAtEnd(LLVMBasicBlockRef block)
+    {
+        _builder.PositionAtEnd(block);
+        _blockTerminated = false;
+    }
+
+    private LLVMValueRef BuildRet(LLVMValueRef value)
+    {
+        _blockTerminated = true;
+        return _builder.BuildRet(value);
+    }
+
+    private LLVMValueRef BuildRetVoid()
+    {
+        _blockTerminated = true;
+        return _builder.BuildRetVoid();
+    }
+
+    private LLVMValueRef BuildBr(LLVMBasicBlockRef destination)
+    {
+        _blockTerminated = true;
+        return _builder.BuildBr(destination);
+    }
+
+    private LLVMValueRef BuildCondBr(LLVMValueRef condition, LLVMBasicBlockRef thenBlock, LLVMBasicBlockRef elseBlock)
+    {
+        _blockTerminated = true;
+        return _builder.BuildCondBr(condition, thenBlock, elseBlock);
+    }
 
     // --- Top level -------------------------------------------------------------------------------
 
@@ -90,14 +134,16 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         var function = _module.GetNamedFunction(node.Name);
         var functionType = _checker.FunctionTypes[node];
 
-        var entry = function.AppendBasicBlock("entry");
-        _builder.PositionAtEnd(entry);
-
         var outerScope = _scope;
+        var outerFunction = _currentFunction;
         _scope = [];
+        _currentFunction = function;
 
         try
         {
+            var entry = function.AppendBasicBlock("entry");
+            PositionAtEnd(entry);
+
             for (var i = 0; i < node.Parameters.Items.Count; i++)
             {
                 var parameter = node.Parameters.Items[i];
@@ -113,6 +159,7 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         finally
         {
             _scope = outerScope;
+            _currentFunction = outerFunction;
         }
     }
 
@@ -149,13 +196,63 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     public LLVMValueRef VisitReturn(KokosReturnNode node)
     {
         if (node.Expression is null)
-            return _builder.BuildRetVoid();
+            return BuildRetVoid();
 
         var value = node.Expression.Accept(this);
-        return _builder.BuildRet(value);
+        return BuildRet(value);
     }
 
     public LLVMValueRef VisitExpressionStatement(KokosExpressionStatementNode node) => node.Expression.Accept(this);
+
+    public LLVMValueRef VisitIfStatement(KokosIfStatementNode node)
+    {
+        var thenBlock = _currentFunction.AppendBasicBlock("if.then");
+        var elseBlock = node.ElseBody is not null ? _currentFunction.AppendBasicBlock("if.else") : default;
+        var mergeBlock = _currentFunction.AppendBasicBlock("if.end");
+
+        var condition = node.Condition.Accept(this);
+        BuildCondBr(condition, thenBlock, node.ElseBody is not null ? elseBlock : mergeBlock);
+
+        PositionAtEnd(thenBlock);
+        node.ThenBlock.Accept(this);
+        if (!_blockTerminated)
+            BuildBr(mergeBlock);
+
+        if (node.ElseBody is not null)
+        {
+            PositionAtEnd(elseBlock);
+            node.ElseBody.Accept(this);
+            if (!_blockTerminated)
+                BuildBr(mergeBlock);
+        }
+
+        // If both branches already returned, mergeBlock has no predecessors — fine, as long as
+        // nothing after this needs a value from it, which the checker's AlwaysReturns already
+        // guarantees for a function whose body ends in such an if.
+        PositionAtEnd(mergeBlock);
+        return default;
+    }
+
+    public LLVMValueRef VisitWhileStatement(KokosWhileStatementNode node)
+    {
+        var condBlock = _currentFunction.AppendBasicBlock("while.cond");
+        var bodyBlock = _currentFunction.AppendBasicBlock("while.body");
+        var endBlock = _currentFunction.AppendBasicBlock("while.end");
+
+        BuildBr(condBlock);
+
+        PositionAtEnd(condBlock);
+        var condition = node.Condition.Accept(this);
+        BuildCondBr(condition, bodyBlock, endBlock);
+
+        PositionAtEnd(bodyBlock);
+        node.Body.Accept(this);
+        if (!_blockTerminated)
+            BuildBr(condBlock);
+
+        PositionAtEnd(endBlock);
+        return default;
+    }
 
     // --- Expressions ---------------------------------------------------------------------------------
 
@@ -178,25 +275,102 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         };
     }
 
+    public LLVMValueRef VisitLiteralBool(KokosLiteralBoolNode node) =>
+        LLVMValueRef.CreateConstInt(Context.Int1Type, node.Value ? 1u : 0u, false);
+
+    private static bool IsComparisonOperator(TokenKind kind) => kind is
+        TokenKind.EqualsEquals or TokenKind.BangEquals or
+        TokenKind.Less or TokenKind.LessEquals or TokenKind.Greater or TokenKind.GreaterEquals;
+
+    private static LLVMIntPredicate MapIntPredicate(TokenKind kind, bool isSigned) => kind switch
+    {
+        TokenKind.EqualsEquals => LLVMIntPredicate.LLVMIntEQ,
+        TokenKind.BangEquals => LLVMIntPredicate.LLVMIntNE,
+        TokenKind.Less => isSigned ? LLVMIntPredicate.LLVMIntSLT : LLVMIntPredicate.LLVMIntULT,
+        TokenKind.LessEquals => isSigned ? LLVMIntPredicate.LLVMIntSLE : LLVMIntPredicate.LLVMIntULE,
+        TokenKind.Greater => isSigned ? LLVMIntPredicate.LLVMIntSGT : LLVMIntPredicate.LLVMIntUGT,
+        TokenKind.GreaterEquals => isSigned ? LLVMIntPredicate.LLVMIntSGE : LLVMIntPredicate.LLVMIntUGE,
+        _ => throw new ArgumentOutOfRangeException(nameof(kind)),
+    };
+
+    private static LLVMRealPredicate MapRealPredicate(TokenKind kind) => kind switch
+    {
+        TokenKind.EqualsEquals => LLVMRealPredicate.LLVMRealOEQ,
+        TokenKind.BangEquals => LLVMRealPredicate.LLVMRealONE,
+        TokenKind.Less => LLVMRealPredicate.LLVMRealOLT,
+        TokenKind.LessEquals => LLVMRealPredicate.LLVMRealOLE,
+        TokenKind.Greater => LLVMRealPredicate.LLVMRealOGT,
+        TokenKind.GreaterEquals => LLVMRealPredicate.LLVMRealOGE,
+        _ => throw new ArgumentOutOfRangeException(nameof(kind)),
+    };
+
     public LLVMValueRef VisitMathOperator(KokosMathOperatorNode node)
     {
+        var op = node.OperatorToken.Kind;
+
+        // Non-short-circuiting by design (see the plan) — an eager bitwise op on i1 operands is
+        // exactly a non-short-circuit boolean and/or, no branching needed for these two.
+        if (op is TokenKind.AmpAmp or TokenKind.PipePipe)
+        {
+            var leftBool = node.Left.Accept(this);
+            var rightBool = node.Right.Accept(this);
+            return op == TokenKind.AmpAmp ? _builder.BuildAnd(leftBool, rightBool) : _builder.BuildOr(leftBool, rightBool);
+        }
+
         var left = node.Left.Accept(this);
         var right = node.Right.Accept(this);
+
+        if (IsComparisonOperator(op))
+        {
+            // The predicate depends on the *operand* type (equality/relational both require the
+            // operands to already match, per the checker), not the result (always Bool).
+            var operandType = _checker.ExpressionTypes[node.Left];
+
+            return KokosLlvmTypeMapper.IsFloatingPoint(operandType)
+                ? _builder.BuildFCmp(MapRealPredicate(op), left, right)
+                : _builder.BuildICmp(MapIntPredicate(op, KokosLlvmTypeMapper.IsSigned(operandType)), left, right);
+        }
 
         var resultType = _checker.ExpressionTypes[node];
         var isFloat = KokosLlvmTypeMapper.IsFloatingPoint(resultType);
         var isSigned = KokosLlvmTypeMapper.IsSigned(resultType);
 
-        return node.OperatorToken.Kind switch
+        return op switch
         {
             TokenKind.Plus => isFloat ? _builder.BuildFAdd(left, right) : _builder.BuildAdd(left, right),
             TokenKind.Minus => isFloat ? _builder.BuildFSub(left, right) : _builder.BuildSub(left, right),
             TokenKind.Star => isFloat ? _builder.BuildFMul(left, right) : _builder.BuildMul(left, right),
             TokenKind.Slash => isFloat ? _builder.BuildFDiv(left, right) : isSigned ? _builder.BuildSDiv(left, right) : _builder.BuildUDiv(left, right),
-            _ => throw new NotSupportedException(
-                $"Operator '{node.OperatorToken.Text}' has no result to produce yet — comparison/logical operators " +
-                "need a boolean concept that doesn't exist until Phase B/C."),
+            _ => throw new NotSupportedException($"Operator '{node.OperatorToken.Text}' is not supported by codegen."),
         };
+    }
+
+    public LLVMValueRef VisitConditionalExpression(KokosConditionalExpressionNode node)
+    {
+        var resultType = _typeMapper.Map(_checker.ExpressionTypes[node]);
+        var result = _builder.BuildAlloca(resultType, "cond.result");
+
+        var thenBlock = _currentFunction.AppendBasicBlock("cond.then");
+        var elseBlock = _currentFunction.AppendBasicBlock("cond.else");
+        var mergeBlock = _currentFunction.AppendBasicBlock("cond.end");
+
+        var condition = node.Condition.Accept(this);
+        BuildCondBr(condition, thenBlock, elseBlock);
+
+        // Unlike an if-*statement*, a branch here can never already be terminated — 'return' is a
+        // statement, never nested inside an expression — so both branches unconditionally reach
+        // the merge block; this is what makes the ternary genuinely short-circuit (only the taken
+        // branch's expression tree is ever evaluated).
+        PositionAtEnd(thenBlock);
+        _builder.BuildStore(node.TrueValue.Accept(this), result);
+        BuildBr(mergeBlock);
+
+        PositionAtEnd(elseBlock);
+        _builder.BuildStore(node.FalseValue.Accept(this), result);
+        BuildBr(mergeBlock);
+
+        PositionAtEnd(mergeBlock);
+        return _builder.BuildLoad2(resultType, result, "cond.result");
     }
 
     public LLVMValueRef VisitAssignment(KokosAssignmentNode node)
@@ -230,6 +404,17 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
 
     public LLVMValueRef VisitParenthesized(KokosParenthesizedExpressionNode node) => node.Expression.Accept(this);
 
+    public LLVMValueRef VisitUnaryOperator(KokosUnaryOperatorNode node)
+    {
+        var operand = node.Operand.Accept(this);
+
+        if (node.OperatorToken.Kind == TokenKind.Bang)
+            return _builder.BuildNot(operand);
+
+        var operandType = _checker.ExpressionTypes[node.Operand];
+        return KokosLlvmTypeMapper.IsFloatingPoint(operandType) ? _builder.BuildFNeg(operand) : _builder.BuildNeg(operand);
+    }
+
     // --- Not yet supported (later phases) -------------------------------------------------------------
 
     private static NotSupportedException NotYet(string node, string phase) =>
@@ -249,6 +434,5 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     public LLVMValueRef VisitStructDecl(KokosStructDeclNode node) => throw NotYet(nameof(KokosStructDeclNode), "Phase E");
     public LLVMValueRef VisitField(KokosFieldNode node) => throw NotYet(nameof(KokosFieldNode), "Phase E");
     public LLVMValueRef VisitLiteralString(KokosLiteralStringNode node) => throw NotYet(nameof(KokosLiteralStringNode), "needs a string runtime representation, Phase E");
-    public LLVMValueRef VisitUnaryOperator(KokosUnaryOperatorNode node) => throw NotYet(nameof(KokosUnaryOperatorNode), "'-' needs a result-type decision and '!' needs a boolean concept, Phase B/C");
     public LLVMValueRef VisitMemberAccess(KokosMemberAccessNode node) => throw NotYet(nameof(KokosMemberAccessNode), "needs struct codegen, Phase E");
 }
