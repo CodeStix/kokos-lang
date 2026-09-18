@@ -1,0 +1,81 @@
+using System.Runtime.InteropServices;
+using LLVMSharp.Interop;
+
+namespace Kokos.CodeGen;
+
+/// <summary>
+/// Thin wrapper over LLVM's ORC LLJIT for executing a generated module in-process — the concrete
+/// proof that the whole LLVMSharp/native-libLLVM toolchain actually works, not just that IR gets
+/// built. One instance owns one module/execution session; dispose after use.
+/// </summary>
+public sealed unsafe class KokosJit : IDisposable
+{
+    private static readonly object InitLock = new();
+    private static bool _nativeTargetInitialized;
+
+    private readonly LLVMOrcLLJITRef _jit;
+
+    private KokosJit(LLVMOrcLLJITRef jit)
+    {
+        _jit = jit;
+    }
+
+    /// <summary>
+    /// Takes ownership of <paramref name="module"/> and <paramref name="context"/> — per ORC v2's
+    /// usual ownership rules, once a module is wrapped as a thread-safe module and handed to the
+    /// JIT, the JIT owns it. Neither should be disposed by the caller afterward.
+    /// </summary>
+    public static KokosJit Create(LLVMModuleRef module, LLVMContextRef context)
+    {
+        EnsureNativeTargetInitialized();
+
+        var builder = LLVMOrcLLJITBuilderRef.Create();
+        var createError = LLVMOrcLLJITRef.Create(out var jit, builder);
+        ThrowIfError(createError, "creating the LLJIT instance");
+
+        var threadSafeContext = LLVMOrcThreadSafeContextRef.CreateFromContext(context);
+        var threadSafeModule = LLVMOrcThreadSafeModuleRef.Create(module, threadSafeContext);
+
+        var addError = jit.AddLLVMIRModule(jit.MainJITDylib, threadSafeModule);
+        ThrowIfError(addError, "adding the generated module to the LLJIT");
+
+        return new KokosJit(jit);
+    }
+
+    private static void EnsureNativeTargetInitialized()
+    {
+        lock (InitLock)
+        {
+            if (_nativeTargetInitialized)
+                return;
+
+            LLVM.InitializeNativeTarget();
+            LLVM.InitializeNativeAsmPrinter();
+            _nativeTargetInitialized = true;
+        }
+    }
+
+    /// <summary>Looks up a compiled function by name and returns it as a callable delegate.</summary>
+    public T GetFunction<T>(string name)
+        where T : Delegate
+    {
+        var lookupError = _jit.Lookup(out var address, name);
+        ThrowIfError(lookupError, $"looking up '{name}'");
+
+        return Marshal.GetDelegateForFunctionPointer<T>(new IntPtr(unchecked((long)address)));
+    }
+
+    private static void ThrowIfError(LLVMErrorRef error, string action)
+    {
+        if (error == default)
+            return;
+
+        var messagePtr = LLVM.GetErrorMessage((LLVMOpaqueError*)error);
+        var message = Marshal.PtrToStringAnsi(new IntPtr(messagePtr)) ?? "(no message)";
+        LLVM.DisposeErrorMessage(messagePtr);
+
+        throw new InvalidOperationException($"LLVM error while {action}: {message}");
+    }
+
+    public void Dispose() => _jit.Dispose();
+}

@@ -29,7 +29,14 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
     private readonly KokosDiagnosticBag _diagnostics;
 
     private readonly Dictionary<KokosFunctionNode, KokosFunctionType> _functionTypes = new();
+    private readonly Dictionary<KokosExpressionNode, KokosType> _expressionTypes = new();
     private readonly HashSet<KokosFunctionNode> _inProgress = new();
+
+    /// <summary>Every function's resolved signature, keyed by declaration — consumed by codegen.</summary>
+    public IReadOnlyDictionary<KokosFunctionNode, KokosFunctionType> FunctionTypes => _functionTypes;
+
+    /// <summary>Every expression's resolved type, keyed by node — consumed by codegen so it never re-derives what this checker already decided.</summary>
+    public IReadOnlyDictionary<KokosExpressionNode, KokosType> ExpressionTypes => _expressionTypes;
 
     // Saved/restored around every (possibly re-entrant, via a forward-referencing call) function
     // check — see CheckFunctionCore.
@@ -54,13 +61,27 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
 
     private static TextSpan SpanOf(KokosNode node) => node.GetTokens().First().Span;
 
+    /// <summary>
+    /// The one place every expression's type gets computed and recorded into
+    /// <see cref="ExpressionTypes"/> — every internal dispatch onto a <see cref="KokosExpressionNode"/>
+    /// goes through this (or <see cref="CheckExpression"/>, which calls it) rather than a bare
+    /// <c>Accept(this)</c>, so codegen can later look up any expression's resolved type without this
+    /// checker needing to run again.
+    /// </summary>
+    private KokosType TypeOf(KokosExpressionNode expression)
+    {
+        var type = expression.Accept(this);
+        _expressionTypes[expression] = type;
+        return type;
+    }
+
     private KokosType CheckExpression(KokosExpressionNode expression, KokosType? expectedType)
     {
         var previous = _expectedType;
         _expectedType = expectedType;
         try
         {
-            return expression.Accept(this);
+            return TypeOf(expression);
         }
         finally
         {
@@ -243,7 +264,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         return expressionType;
     }
 
-    public KokosType VisitExpressionStatement(KokosExpressionStatementNode node) => node.Expression.Accept(this);
+    public KokosType VisitExpressionStatement(KokosExpressionStatementNode node) => TypeOf(node.Expression);
 
     // --- Expressions ---------------------------------------------------------------------------------
 
@@ -282,8 +303,8 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
 
     public KokosType VisitMathOperator(KokosMathOperatorNode node)
     {
-        var left = node.Left.Accept(this);
-        var right = node.Right.Accept(this);
+        var left = TypeOf(node.Left);
+        var right = TypeOf(node.Right);
 
         if (left is KokosUnknownType || right is KokosUnknownType)
             return KokosUnknownType.Instance;
@@ -309,7 +330,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
 
     public KokosType VisitUnaryOperator(KokosUnaryOperatorNode node)
     {
-        var operandType = node.Operand.Accept(this);
+        var operandType = TypeOf(node.Operand);
 
         if (operandType is KokosUnknownType or KokosErrorType)
             return operandType;
@@ -327,7 +348,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
 
     public KokosType VisitAssignment(KokosAssignmentNode node)
     {
-        var targetType = node.Target.Accept(this);
+        var targetType = TypeOf(node.Target);
         var valueType = CheckExpression(node.Value, targetType);
 
         if (targetType is not (KokosUnknownType or KokosErrorType) && !IsAssignable(valueType, targetType))
@@ -365,7 +386,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             return enumType;
         }
 
-        var targetType = node.Target.Accept(this);
+        var targetType = TypeOf(node.Target);
 
         if (targetType is KokosUnknownType or KokosErrorType)
             return KokosUnknownType.Instance;
@@ -399,9 +420,9 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             if (_table.TryGetFunction(calleeIdentifier.Name, out var functionDecl))
                 return CheckFunctionCall(node, GetFunctionType(functionDecl));
 
-            node.Callee.Accept(this); // still reports "unknown identifier" if that's genuinely what this is
+            TypeOf(node.Callee); // still reports "unknown identifier" if that's genuinely what this is
             foreach (var argument in node.Arguments.Items)
-                argument.Expression.Accept(this);
+                TypeOf(argument.Expression);
             return KokosUnknownType.Instance;
         }
 
@@ -414,9 +435,9 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
 
         // Case 3: anything else (member calls like `.join(...)`, since there's no method-declaration
         // syntax to resolve them against) — unchecked, per the scope boundary documented on the class.
-        node.Callee.Accept(this);
+        TypeOf(node.Callee);
         foreach (var argument in node.Arguments.Items)
-            argument.Expression.Accept(this);
+            TypeOf(argument.Expression);
         return KokosUnknownType.Instance;
     }
 
@@ -465,7 +486,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             }
             else
             {
-                argument.Expression.Accept(this);
+                TypeOf(argument.Expression);
             }
         }
 
@@ -547,7 +568,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         return functionType.ReturnType;
     }
 
-    public KokosType VisitArgument(KokosArgumentNode node) => node.Expression.Accept(this);
+    public KokosType VisitArgument(KokosArgumentNode node) => TypeOf(node.Expression);
 
-    public KokosType VisitParenthesized(KokosParenthesizedExpressionNode node) => node.Expression.Accept(this);
+    public KokosType VisitParenthesized(KokosParenthesizedExpressionNode node) => TypeOf(node.Expression);
 }
