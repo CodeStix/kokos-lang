@@ -1,17 +1,23 @@
 namespace Kokos.Compiler.Syntax.Nodes;
 
-/// <summary>The root node of a parsed file: a sequence of top-level function declarations.</summary>
+/// <summary>
+/// The root node of a parsed file: a sequence of top-level members (functions, type aliases,
+/// enum declarations, struct declarations).
+/// </summary>
 public sealed class KokosCompilationUnitNode : KokosNode
 {
-    public IReadOnlyList<KokosFunctionNode> Functions { get; }
+    public IReadOnlyList<KokosMemberNode> Members { get; }
     public KokosToken EndOfFileToken { get; }
 
-    public KokosCompilationUnitNode(IReadOnlyList<KokosFunctionNode> functions, KokosToken endOfFileToken)
+    /// <summary>Convenience view over <see cref="Members"/> for callers that only care about functions.</summary>
+    public IReadOnlyList<KokosFunctionNode> Functions => Members.OfType<KokosFunctionNode>().ToList();
+
+    public KokosCompilationUnitNode(IReadOnlyList<KokosMemberNode> members, KokosToken endOfFileToken)
     {
-        Functions = functions;
+        Members = members;
         EndOfFileToken = endOfFileToken;
 
-        AddChildren(functions);
+        AddChildren(members);
         AddChild(endOfFileToken);
     }
 

@@ -5,7 +5,7 @@ namespace Kokos.Compiler.Syntax.Nodes;
 /// annotation is optional in the grammar (<see cref="ColonToken"/>/<see cref="ReturnType"/> are
 /// both null when omitted).
 /// </summary>
-public sealed class KokosFunctionNode : KokosNode
+public sealed class KokosFunctionNode : KokosMemberNode
 {
     public KokosToken FunctionKeyword { get; }
     public KokosToken NameToken { get; }

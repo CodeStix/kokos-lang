@@ -18,6 +18,13 @@ public sealed class KokosTokenizer
         ["function"] = TokenKind.FunctionKeyword,
         ["let"] = TokenKind.LetKeyword,
         ["return"] = TokenKind.ReturnKeyword,
+        ["type"] = TokenKind.TypeKeyword,
+        ["opaque"] = TokenKind.OpaqueKeyword,
+        ["enum"] = TokenKind.EnumKeyword,
+        ["struct"] = TokenKind.StructKeyword,
+        ["value"] = TokenKind.ValueKeyword,
+        ["length"] = TokenKind.LengthKeyword,
+        ["terminated"] = TokenKind.TerminatedKeyword,
     };
 
     private readonly string _source;
@@ -253,6 +260,8 @@ public sealed class KokosTokenizer
             (':', _) => (TokenKind.Colon, 1),
             (';', _) => (TokenKind.Semicolon, 1),
             ('.', _) => (TokenKind.Dot, 1),
+            ('?', _) => (TokenKind.Question, 1),
+            ('|', _) => (TokenKind.Pipe, 1),
             ('=', _) => (TokenKind.Equals, 1),
             ('!', _) => (TokenKind.Bang, 1),
             ('+', _) => (TokenKind.Plus, 1),

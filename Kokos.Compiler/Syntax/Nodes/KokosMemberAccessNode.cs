@@ -1,6 +1,10 @@
 namespace Kokos.Compiler.Syntax.Nodes;
 
-/// <summary>A member access, e.g. <c>args.join</c> or <c>num.toString</c>.</summary>
+/// <summary>
+/// A member access, e.g. <c>args.join</c> or <c>num.toString</c> — or, when <see cref="NameToken"/>
+/// is a <see cref="TokenKind.NumberLiteral"/> rather than an <see cref="TokenKind.Identifier"/>,
+/// positional tuple field access like <c>vector.0</c>.
+/// </summary>
 public sealed class KokosMemberAccessNode : KokosExpressionNode
 {
     public KokosExpressionNode Target { get; }

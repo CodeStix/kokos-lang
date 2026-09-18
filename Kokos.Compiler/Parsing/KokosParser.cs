@@ -38,6 +38,8 @@ public sealed class KokosParser
 
     private KokosToken Current => _tokens[_pos];
 
+    private KokosToken Peek(int offset) => _tokens[Math.Min(_pos + offset, _tokens.Count - 1)];
+
     private KokosToken Advance()
     {
         var token = Current;
@@ -59,18 +61,26 @@ public sealed class KokosParser
 
     private KokosCompilationUnitNode ParseCompilationUnit()
     {
-        var functions = new List<KokosFunctionNode>();
+        var members = new List<KokosMemberNode>();
 
         while (Current.Kind != TokenKind.EndOfFile)
         {
             var before = _pos;
-            functions.Add(ParseFunctionDeclaration());
+            members.Add(ParseMember());
             EnsureProgress(before);
         }
 
         var eof = Advance();
-        return new KokosCompilationUnitNode(functions, eof);
+        return new KokosCompilationUnitNode(members, eof);
     }
+
+    private KokosMemberNode ParseMember() => Current.Kind switch
+    {
+        TokenKind.TypeKeyword or TokenKind.OpaqueKeyword => ParseTypeAlias(),
+        TokenKind.EnumKeyword => ParseEnumDecl(),
+        TokenKind.StructKeyword or TokenKind.ValueKeyword => ParseStructDecl(),
+        _ => ParseFunctionDeclaration(),
+    };
 
     private KokosFunctionNode ParseFunctionDeclaration()
     {
@@ -101,18 +111,168 @@ public sealed class KokosParser
         return new KokosParameterNode(name, colon, type);
     }
 
-    private KokosTypeNode ParseType()
+    private KokosTypeAliasNode ParseTypeAlias()
     {
-        if (Current.Kind == TokenKind.OpenBracket)
+        var opaqueKeyword = Current.Kind == TokenKind.OpaqueKeyword ? Advance() : null;
+        var typeKeyword = Expect(TokenKind.TypeKeyword, "'type'");
+        var name = Expect(TokenKind.Identifier, "a type name");
+        var equals = Expect(TokenKind.Equals, "'='");
+        var type = ParseType();
+        var semicolon = Expect(TokenKind.Semicolon, "';'");
+        return new KokosTypeAliasNode(opaqueKeyword, typeKeyword, name, equals, type, semicolon);
+    }
+
+    private KokosEnumDeclNode ParseEnumDecl()
+    {
+        var enumKeyword = Advance();
+        var name = Expect(TokenKind.Identifier, "an enum name");
+        var openBrace = Expect(TokenKind.OpenBrace, "'{'");
+        var variants = ParseSeparatedList(TokenKind.CloseBrace, ParseEnumVariant);
+        var closeBrace = Expect(TokenKind.CloseBrace, "'}'");
+        return new KokosEnumDeclNode(enumKeyword, name, openBrace, variants, closeBrace);
+    }
+
+    private KokosEnumVariantNode ParseEnumVariant()
+    {
+        var name = Expect(TokenKind.Identifier, "a variant name");
+
+        KokosToken? openParen = null;
+        KokosTypeNode? payloadType = null;
+        KokosToken? closeParen = null;
+        if (Current.Kind == TokenKind.OpenParen)
         {
-            var open = Advance();
-            var elementType = ParseType();
-            var close = Expect(TokenKind.CloseBracket, "']'");
-            return new KokosArrayTypeNode(open, elementType, close);
+            openParen = Advance();
+            payloadType = ParseType();
+            closeParen = Expect(TokenKind.CloseParen, "')'");
         }
 
-        var name = Expect(TokenKind.Identifier, "a type name");
-        return new KokosNamedTypeNode(name);
+        KokosToken? equals = null;
+        KokosToken? discriminator = null;
+        if (Current.Kind == TokenKind.Equals)
+        {
+            equals = Advance();
+            discriminator = Expect(TokenKind.NumberLiteral, "a discriminator value");
+        }
+
+        return new KokosEnumVariantNode(name, openParen, payloadType, closeParen, equals, discriminator);
+    }
+
+    private KokosStructDeclNode ParseStructDecl()
+    {
+        var valueKeyword = Current.Kind == TokenKind.ValueKeyword ? Advance() : null;
+        var structKeyword = Expect(TokenKind.StructKeyword, "'struct'");
+        var name = Expect(TokenKind.Identifier, "a struct name");
+        var openBrace = Expect(TokenKind.OpenBrace, "'{'");
+        var fields = ParseSeparatedList(TokenKind.CloseBrace, ParseField);
+        var closeBrace = Expect(TokenKind.CloseBrace, "'}'");
+        return new KokosStructDeclNode(valueKeyword, structKeyword, name, openBrace, fields, closeBrace);
+    }
+
+    /// <summary>Parses <c>Type</c>, <c>name: Type</c>, or <c>0 name: Type</c> — shared by struct bodies and inline tuple types.</summary>
+    private KokosFieldNode ParseField()
+    {
+        var indexToken = Current.Kind == TokenKind.NumberLiteral && Peek(1).Kind == TokenKind.Identifier
+            ? Advance()
+            : null;
+
+        KokosToken? nameToken = null;
+        KokosToken? colonToken = null;
+        if (Current.Kind == TokenKind.Identifier && Peek(1).Kind == TokenKind.Colon)
+        {
+            nameToken = Advance();
+            colonToken = Advance();
+        }
+
+        var type = ParseType();
+        return new KokosFieldNode(indexToken, nameToken, colonToken, type);
+    }
+
+    // --- Types (precedence climbing, mirroring the expression chain below) -----
+
+    private KokosTypeNode ParseType() => ParseUnionType();
+
+    private KokosTypeNode ParseUnionType()
+    {
+        var first = ParseOptionalType();
+        var members = new List<KokosTypeNode> { first };
+        var separators = new List<KokosToken>();
+
+        while (Current.Kind == TokenKind.Pipe)
+        {
+            separators.Add(Advance());
+            members.Add(ParseOptionalType());
+        }
+
+        return separators.Count == 0
+            ? first
+            : new KokosUnionTypeNode(new KokosSeparatedList<KokosTypeNode>(members, separators));
+    }
+
+    private KokosTypeNode ParseOptionalType()
+    {
+        var type = ParseAtomicType();
+
+        if (Current.Kind == TokenKind.Question)
+        {
+            var question = Advance();
+            return new KokosOptionalTypeNode(type, question);
+        }
+
+        return type;
+    }
+
+    private KokosTypeNode ParseAtomicType()
+    {
+        switch (Current.Kind)
+        {
+            case TokenKind.OpenBracket:
+            {
+                var open = Advance();
+                var elementType = ParseType();
+                var close = Expect(TokenKind.CloseBracket, "']'");
+                return new KokosArrayTypeNode(open, elementType, close);
+            }
+
+            case TokenKind.LengthKeyword:
+            {
+                var lengthKeyword = Advance();
+                var openParen = Expect(TokenKind.OpenParen, "'('");
+                var size = Expect(TokenKind.NumberLiteral, "an array length");
+                var closeParen = Expect(TokenKind.CloseParen, "')'");
+                var openBracket = Expect(TokenKind.OpenBracket, "'['");
+                var elementType = ParseType();
+                var closeBracket = Expect(TokenKind.CloseBracket, "']'");
+                return new KokosFixedLengthArrayTypeNode(lengthKeyword, openParen, size, closeParen, openBracket, elementType, closeBracket);
+            }
+
+            case TokenKind.TerminatedKeyword:
+            {
+                var terminatedKeyword = Advance();
+                var openBracket = Expect(TokenKind.OpenBracket, "'['");
+                var elementType = ParseType();
+                var closeBracket = Expect(TokenKind.CloseBracket, "']'");
+                return new KokosTerminatedArrayTypeNode(terminatedKeyword, openBracket, elementType, closeBracket);
+            }
+
+            case TokenKind.ValueKeyword:
+            case TokenKind.OpenParen:
+                return ParseTupleType();
+
+            default:
+            {
+                var name = Expect(TokenKind.Identifier, "a type name");
+                return new KokosNamedTypeNode(name);
+            }
+        }
+    }
+
+    private KokosTupleTypeNode ParseTupleType()
+    {
+        var valueKeyword = Current.Kind == TokenKind.ValueKeyword ? Advance() : null;
+        var openParen = Expect(TokenKind.OpenParen, "'('");
+        var fields = ParseSeparatedList(TokenKind.CloseParen, ParseField);
+        var closeParen = Expect(TokenKind.CloseParen, "')'");
+        return new KokosTupleTypeNode(valueKeyword, openParen, fields, closeParen);
     }
 
     // --- Statements --------------------------------------------------------
@@ -144,10 +304,19 @@ public sealed class KokosParser
     {
         var letKeyword = Advance();
         var name = Expect(TokenKind.Identifier, "a variable name");
+
+        KokosToken? colon = null;
+        KokosTypeNode? type = null;
+        if (Current.Kind == TokenKind.Colon)
+        {
+            colon = Advance();
+            type = ParseType();
+        }
+
         var equals = Expect(TokenKind.Equals, "'='");
         var initializer = ParseExpression();
         var semicolon = Expect(TokenKind.Semicolon, "';'");
-        return new KokosVarDeclNode(letKeyword, name, equals, initializer, semicolon);
+        return new KokosVarDeclNode(letKeyword, name, colon, type, equals, initializer, semicolon);
     }
 
     private KokosReturnNode ParseReturn()
@@ -238,13 +407,13 @@ public sealed class KokosParser
             if (Current.Kind == TokenKind.Dot)
             {
                 var dot = Advance();
-                var name = Expect(TokenKind.Identifier, "a member name");
+                var name = ExpectMemberName();
                 expression = new KokosMemberAccessNode(expression, dot, name);
             }
             else if (Current.Kind == TokenKind.OpenParen)
             {
                 var openParen = Advance();
-                var arguments = ParseSeparatedList(TokenKind.CloseParen, ParseExpression);
+                var arguments = ParseArgumentList();
                 var closeParen = Expect(TokenKind.CloseParen, "')'");
                 expression = new KokosCallNode(expression, openParen, arguments, closeParen);
             }
@@ -255,6 +424,16 @@ public sealed class KokosParser
         }
 
         return expression;
+    }
+
+    /// <summary>Accepts an identifier (<c>.join</c>) or an integer (<c>.0</c>, tuple field access).</summary>
+    private KokosToken ExpectMemberName()
+    {
+        if (Current.Kind is TokenKind.Identifier or TokenKind.NumberLiteral)
+            return Advance();
+
+        _diagnostics.ReportError(Current.Span, $"Expected a member name but found '{Current.Text}'.");
+        return new KokosToken(TokenKind.Identifier, "", new TextSpan(Current.Span.Start, 0), [], [], isMissing: true);
     }
 
     private KokosExpressionNode ParsePrimary()
@@ -288,6 +467,52 @@ public sealed class KokosParser
                 return new KokosIdentifierNode(bad);
             }
         }
+    }
+
+    // --- Call arguments ------------------------------------------------------
+
+    /// <summary>
+    /// Parses a call's argument list. Shared by ordinary calls and construction calls
+    /// (<c>Vector3(x: 10, y: 20, z: 30)</c>) — both look identical at parse time. Positional
+    /// arguments may precede named ones but not follow them; a violation is reported as a
+    /// diagnostic (not a hard grammar restriction), consistent with this parser's general
+    /// report-and-recover style.
+    /// </summary>
+    private KokosSeparatedList<KokosArgumentNode> ParseArgumentList()
+    {
+        var items = new List<KokosArgumentNode>();
+        var separators = new List<KokosToken>();
+        var sawNamed = false;
+
+        if (Current.Kind != TokenKind.CloseParen && Current.Kind != TokenKind.EndOfFile)
+        {
+            items.Add(ParseArgument(ref sawNamed));
+
+            while (Current.Kind == TokenKind.Comma)
+            {
+                separators.Add(Advance());
+                items.Add(ParseArgument(ref sawNamed));
+            }
+        }
+
+        return new KokosSeparatedList<KokosArgumentNode>(items, separators);
+    }
+
+    private KokosArgumentNode ParseArgument(ref bool sawNamed)
+    {
+        if (Current.Kind == TokenKind.Identifier && Peek(1).Kind == TokenKind.Colon)
+        {
+            var name = Advance();
+            var colon = Advance();
+            var value = ParseExpression();
+            sawNamed = true;
+            return new KokosArgumentNode(name, colon, value);
+        }
+
+        if (sawNamed)
+            _diagnostics.ReportError(Current.Span, "A positional argument cannot follow a named argument.");
+
+        return new KokosArgumentNode(null, null, ParseExpression());
     }
 
     // --- Helpers -------------------------------------------------------------

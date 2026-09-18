@@ -1,3 +1,4 @@
+using Kokos.Compiler.Formatting;
 using Kokos.Compiler.Parsing;
 using Kokos.Compiler.Syntax;
 
@@ -6,8 +7,12 @@ namespace Kokos;
 internal class Program
 {
     private const string ExampleSource = """
+
+        type String = [Int8];
+
         function exampleFunc(args: [String], num: Int): Object {
-            let exampleVar = args.join(".");
+                let exampleVar = args.join(".oof");
+
             return exampleVar + num.toString();
         }
         """;
@@ -33,7 +38,7 @@ internal class Program
         var matches = roundTripped == source;
 
         Console.WriteLine();
-        Console.WriteLine($"=== Round-trip {(matches ? "OK" : "MISMATCH")} ===");
+        Console.WriteLine($"=== Round-trip {(matches ? "OK" : "MISMATCH")} === check");
         if (!matches)
         {
             Console.WriteLine("--- original ---");
@@ -41,6 +46,10 @@ internal class Program
             Console.WriteLine("--- reconstructed ---");
             Console.WriteLine(roundTripped);
         }
+
+        Console.WriteLine();
+        Console.WriteLine("=== Formatted ===");
+        Console.Write(KokosFormatter.Format(unit));
     }
 
     private static void DumpNode(KokosSyntaxElement element, int depth)

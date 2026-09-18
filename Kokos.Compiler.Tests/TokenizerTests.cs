@@ -27,6 +27,13 @@ public class TokenizerTests
     [Theory]
     [InlineData("let")]
     [InlineData("return")]
+    [InlineData("type")]
+    [InlineData("opaque")]
+    [InlineData("enum")]
+    [InlineData("struct")]
+    [InlineData("value")]
+    [InlineData("length")]
+    [InlineData("terminated")]
     public void Recognizes_keyword(string text)
     {
         var tokens = new KokosTokenizer(text).Tokenize();
@@ -88,6 +95,30 @@ public class TokenizerTests
                 TokenKind.EndOfFile,
             ],
             tokens.Select(t => t.Kind));
+    }
+
+    [Fact]
+    public void Recognizes_single_pipe_distinctly_from_double_pipe()
+    {
+        var tokens = new KokosTokenizer("A|B || C").Tokenize();
+
+        Assert.Equal(
+            [
+                TokenKind.Identifier,
+                TokenKind.Pipe,
+                TokenKind.Identifier,
+                TokenKind.PipePipe,
+                TokenKind.Identifier,
+                TokenKind.EndOfFile,
+            ],
+            tokens.Select(t => t.Kind));
+    }
+
+    [Fact]
+    public void Recognizes_question_mark()
+    {
+        var tokens = new KokosTokenizer("Int?").Tokenize();
+        Assert.Equal([TokenKind.Identifier, TokenKind.Question, TokenKind.EndOfFile], tokens.Select(t => t.Kind));
     }
 
     [Fact]

@@ -1,4 +1,5 @@
 using Kokos.Compiler.Parsing;
+using Kokos.Compiler.Syntax;
 using Kokos.Compiler.Syntax.Nodes;
 using Xunit;
 
@@ -61,7 +62,9 @@ public class ParserTests
         Assert.Equal("join", member.MemberName);
         Assert.IsType<KokosIdentifierNode>(member.Target);
 
-        var arg = Assert.IsType<KokosLiteralStringNode>(Assert.Single(call.Arguments.Items));
+        var argument = Assert.Single(call.Arguments.Items);
+        Assert.Null(argument.Name);
+        var arg = Assert.IsType<KokosLiteralStringNode>(argument.Expression);
         Assert.Equal(".", arg.Value);
     }
 
@@ -115,5 +118,255 @@ public class ParserTests
     {
         KokosParser.Parse("function f(): Int { return 1;", out var diagnostics);
         Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Parses_type_alias()
+    {
+        var unit = KokosParser.Parse("type Byte = UInt8;", out var diagnostics);
+        Assert.False(diagnostics.HasErrors);
+
+        var alias = Assert.IsType<KokosTypeAliasNode>(Assert.Single(unit.Members));
+        Assert.Null(alias.OpaqueKeyword);
+        Assert.Equal("Byte", alias.Name);
+        var named = Assert.IsType<KokosNamedTypeNode>(alias.Type);
+        Assert.Equal("UInt8", named.Name);
+    }
+
+    [Fact]
+    public void Parses_opaque_type_alias()
+    {
+        var unit = KokosParser.Parse("opaque type String = [Int8];", out var diagnostics);
+        Assert.False(diagnostics.HasErrors);
+
+        var alias = Assert.IsType<KokosTypeAliasNode>(Assert.Single(unit.Members));
+        Assert.NotNull(alias.OpaqueKeyword);
+        Assert.IsType<KokosArrayTypeNode>(alias.Type);
+    }
+
+    [Fact]
+    public void Parses_union_type_alias_without_desugaring_it()
+    {
+        var unit = KokosParser.Parse("type EnumTest = Person|Fruit;", out var diagnostics);
+        Assert.False(diagnostics.HasErrors);
+
+        var alias = Assert.IsType<KokosTypeAliasNode>(Assert.Single(unit.Members));
+        var union = Assert.IsType<KokosUnionTypeNode>(alias.Type);
+        Assert.Equal(2, union.Members.Items.Count);
+        Assert.Equal("Person", Assert.IsType<KokosNamedTypeNode>(union.Members.Items[0]).Name);
+        Assert.Equal("Fruit", Assert.IsType<KokosNamedTypeNode>(union.Members.Items[1]).Name);
+    }
+
+    [Fact]
+    public void Parses_optional_type()
+    {
+        var unit = KokosParser.Parse("function f(x: Int?) {}", out var diagnostics);
+        Assert.False(diagnostics.HasErrors);
+
+        var optional = Assert.IsType<KokosOptionalTypeNode>(unit.Functions[0].Parameters.Items[0].Type);
+        Assert.Equal("Int", Assert.IsType<KokosNamedTypeNode>(optional.InnerType).Name);
+    }
+
+    [Fact]
+    public void Parses_all_three_array_type_flavors()
+    {
+        var unit = KokosParser.Parse(
+            "function f(a: [Int], b: length(4) [Int], c: terminated [Int8]) {}",
+            out var diagnostics);
+        Assert.False(diagnostics.HasErrors);
+
+        var parameters = unit.Functions[0].Parameters.Items;
+        Assert.IsType<KokosArrayTypeNode>(parameters[0].Type);
+
+        var fixedLength = Assert.IsType<KokosFixedLengthArrayTypeNode>(parameters[1].Type);
+        Assert.Equal("4", fixedLength.SizeToken.Text);
+
+        Assert.IsType<KokosTerminatedArrayTypeNode>(parameters[2].Type);
+    }
+
+    [Fact]
+    public void Parses_enum_with_explicit_and_auto_incrementing_discriminators()
+    {
+        const string source = """
+            enum FruitKind {
+                None = 0,
+                Apple(Int) = 1,
+                Pear(String),
+                Pineapple = 5
+            }
+            """;
+
+        var unit = KokosParser.Parse(source, out var diagnostics);
+        Assert.False(diagnostics.HasErrors);
+
+        var decl = Assert.IsType<KokosEnumDeclNode>(Assert.Single(unit.Members));
+        Assert.Equal("FruitKind", decl.Name);
+        Assert.Equal(4, decl.Variants.Items.Count);
+
+        var pear = decl.Variants.Items[2];
+        Assert.Equal("Pear", pear.Name);
+        Assert.Equal("String", Assert.IsType<KokosNamedTypeNode>(pear.PayloadType).Name);
+        Assert.Null(pear.DiscriminatorToken);
+
+        var pineapple = decl.Variants.Items[3];
+        Assert.Equal("5", pineapple.DiscriminatorToken!.Text);
+    }
+
+    [Fact]
+    public void Parses_value_struct_with_positional_indices()
+    {
+        const string source = """
+            value struct Vector3 {
+                0 x: Int,
+                1 y: Int,
+                2 z: Int
+            }
+            """;
+
+        var unit = KokosParser.Parse(source, out var diagnostics);
+        Assert.False(diagnostics.HasErrors);
+
+        var decl = Assert.IsType<KokosStructDeclNode>(Assert.Single(unit.Members));
+        Assert.NotNull(decl.ValueKeyword);
+        Assert.Equal(3, decl.Fields.Items.Count);
+
+        var x = decl.Fields.Items[0];
+        Assert.Equal("0", x.IndexToken!.Text);
+        Assert.Equal("x", x.Name);
+        Assert.Equal("Int", Assert.IsType<KokosNamedTypeNode>(x.Type).Name);
+    }
+
+    [Fact]
+    public void Parses_struct_without_indices()
+    {
+        const string source = """
+            struct Person {
+                name: String,
+                age: Int
+            }
+            """;
+
+        var unit = KokosParser.Parse(source, out var diagnostics);
+        Assert.False(diagnostics.HasErrors);
+
+        var decl = Assert.IsType<KokosStructDeclNode>(Assert.Single(unit.Members));
+        Assert.Null(decl.ValueKeyword);
+        Assert.All(decl.Fields.Items, f => Assert.Null(f.IndexToken));
+    }
+
+    [Fact]
+    public void Parses_inline_tuple_type_with_names_and_indices()
+    {
+        var unit = KokosParser.Parse("type Vector3 = value (0 x: Float, 1 y: Float, 2 z: Float);", out var diagnostics);
+        Assert.False(diagnostics.HasErrors);
+
+        var alias = Assert.IsType<KokosTypeAliasNode>(Assert.Single(unit.Members));
+        var tuple = Assert.IsType<KokosTupleTypeNode>(alias.Type);
+        Assert.NotNull(tuple.ValueKeyword);
+        Assert.Equal(3, tuple.Fields.Items.Count);
+        Assert.Equal("0", tuple.Fields.Items[0].IndexToken!.Text);
+    }
+
+    [Fact]
+    public void Parses_inline_tuple_type_with_unnamed_fields()
+    {
+        var unit = KokosParser.Parse("type Ip = value (Int8, Int8, Int8, Int8);", out var diagnostics);
+        Assert.False(diagnostics.HasErrors);
+
+        var alias = Assert.IsType<KokosTypeAliasNode>(Assert.Single(unit.Members));
+        var tuple = Assert.IsType<KokosTupleTypeNode>(alias.Type);
+        Assert.All(tuple.Fields.Items, f =>
+        {
+            Assert.Null(f.IndexToken);
+            Assert.Null(f.NameToken);
+        });
+    }
+
+    [Fact]
+    public void Parses_tuple_field_access_by_position()
+    {
+        var unit = KokosParser.Parse("function f(v: Ip): Int8 { return v.0; }", out var diagnostics);
+        Assert.False(diagnostics.HasErrors);
+
+        var returnStatement = Assert.IsType<KokosReturnNode>(unit.Functions[0].Body.Statements[0]);
+        var access = Assert.IsType<KokosMemberAccessNode>(returnStatement.Expression);
+        Assert.Equal("0", access.MemberName);
+        Assert.Equal(TokenKind.NumberLiteral, access.NameToken.Kind);
+    }
+
+    [Fact]
+    public void Parses_construction_call_with_positional_and_named_arguments()
+    {
+        var unit = KokosParser.Parse(
+            "function f(): Vector3 { return Vector3(10, y: 20, z: 30); }",
+            out var diagnostics);
+        Assert.False(diagnostics.HasErrors);
+
+        var returnStatement = Assert.IsType<KokosReturnNode>(unit.Functions[0].Body.Statements[0]);
+        var call = Assert.IsType<KokosCallNode>(returnStatement.Expression);
+        Assert.Equal(3, call.Arguments.Items.Count);
+
+        Assert.Null(call.Arguments.Items[0].Name);
+        Assert.Equal("y", call.Arguments.Items[1].Name);
+        Assert.Equal("z", call.Arguments.Items[2].Name);
+    }
+
+    [Fact]
+    public void Reports_diagnostic_when_positional_argument_follows_named_argument()
+    {
+        KokosParser.Parse("function f(): Vector3 { return Vector3(x: 10, y: 20, 30); }", out var diagnostics);
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Parses_var_decl_with_explicit_type_annotation()
+    {
+        var unit = KokosParser.Parse(
+            "function f(): [UInt8] { let buffer: [UInt8] = readBuffer(); return buffer; }",
+            out var diagnostics);
+        Assert.False(diagnostics.HasErrors);
+
+        var varDecl = Assert.IsType<KokosVarDeclNode>(unit.Functions[0].Body.Statements[0]);
+        Assert.NotNull(varDecl.Type);
+        Assert.IsType<KokosArrayTypeNode>(varDecl.Type);
+    }
+
+    [Fact]
+    public void Reports_diagnostic_when_type_alias_is_missing_its_semicolon()
+    {
+        // A type alias's right-hand side is just a type expression with no closing delimiter of its
+        // own (unlike function/enum/struct, which all end in '}'), so the trailing ';' is mandatory:
+        // without it, nothing marks where the alias ends and the next member begins.
+        KokosParser.Parse("type Byte = UInt8", out var diagnostics);
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Type_alias_followed_by_another_member_parses_cleanly_when_semicolon_terminated()
+    {
+        var unit = KokosParser.Parse(
+            """
+            type String = [Int8];
+
+            function f(): String { return "hi"; }
+            """,
+            out var diagnostics);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+        Assert.Equal(2, unit.Members.Count);
+        Assert.IsType<KokosTypeAliasNode>(unit.Members[0]);
+        Assert.IsType<KokosFunctionNode>(unit.Members[1]);
+    }
+
+    [Fact]
+    public void Parses_var_decl_without_type_annotation()
+    {
+        var unit = KokosParser.Parse(
+            "function f(): [UInt8] { let buffer = readBuffer(); return buffer; }",
+            out var diagnostics);
+        Assert.False(diagnostics.HasErrors);
+
+        var varDecl = Assert.IsType<KokosVarDeclNode>(unit.Functions[0].Body.Statements[0]);
+        Assert.Null(varDecl.Type);
     }
 }

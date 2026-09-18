@@ -13,6 +13,13 @@ public enum TokenKind
     FunctionKeyword,
     LetKeyword,
     ReturnKeyword,
+    TypeKeyword,
+    OpaqueKeyword,
+    EnumKeyword,
+    StructKeyword,
+    ValueKeyword,
+    LengthKeyword,
+    TerminatedKeyword,
 
     // Punctuation
     OpenParen,
@@ -25,6 +32,8 @@ public enum TokenKind
     Colon,
     Semicolon,
     Dot,
+    Question,
+    Pipe,
 
     // Operators
     Equals,
