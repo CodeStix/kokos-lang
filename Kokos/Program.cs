@@ -1,5 +1,6 @@
 using Kokos.Compiler.Formatting;
 using Kokos.Compiler.Parsing;
+using Kokos.Compiler.Semantics;
 using Kokos.Compiler.Syntax;
 
 namespace Kokos;
@@ -9,6 +10,7 @@ internal class Program
     private const string ExampleSource = """
 
         type String = [Int8];
+        type Object = String;
 
         function exampleFunc(args: [String], num: Int): Object {
                 let exampleVar = args.join(".oof");
@@ -22,6 +24,9 @@ internal class Program
         var source = args.Length > 0 ? File.ReadAllText(args[0]) : ExampleSource;
 
         var unit = KokosParser.Parse(source, out var diagnostics);
+
+        var declarationTable = new KokosDeclarationTable(unit, diagnostics);
+        KokosTypeChecker.Check(unit, declarationTable, diagnostics);
 
         Console.WriteLine("=== AST ===");
         DumpNode(unit, 0);
