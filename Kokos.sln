@@ -1,0 +1,65 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.8.34525.116
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Kokos", "Kokos\Kokos.csproj", "{5087F5DF-F5BC-47FA-B1FF-DFCFF6C69E3B}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Kokos.Compiler", "Kokos.Compiler\Kokos.Compiler.csproj", "{ABC5C790-ACFC-4AC7-92CA-E3A49AB97C3D}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Kokos.Compiler.Tests", "Kokos.Compiler.Tests\Kokos.Compiler.Tests.csproj", "{F98A334F-7D41-4B10-BD14-0D43A9BEB8C9}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Debug|x64 = Debug|x64
+		Debug|x86 = Debug|x86
+		Release|Any CPU = Release|Any CPU
+		Release|x64 = Release|x64
+		Release|x86 = Release|x86
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{5087F5DF-F5BC-47FA-B1FF-DFCFF6C69E3B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5087F5DF-F5BC-47FA-B1FF-DFCFF6C69E3B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5087F5DF-F5BC-47FA-B1FF-DFCFF6C69E3B}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{5087F5DF-F5BC-47FA-B1FF-DFCFF6C69E3B}.Debug|x64.Build.0 = Debug|Any CPU
+		{5087F5DF-F5BC-47FA-B1FF-DFCFF6C69E3B}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{5087F5DF-F5BC-47FA-B1FF-DFCFF6C69E3B}.Debug|x86.Build.0 = Debug|Any CPU
+		{5087F5DF-F5BC-47FA-B1FF-DFCFF6C69E3B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5087F5DF-F5BC-47FA-B1FF-DFCFF6C69E3B}.Release|Any CPU.Build.0 = Release|Any CPU
+		{5087F5DF-F5BC-47FA-B1FF-DFCFF6C69E3B}.Release|x64.ActiveCfg = Release|Any CPU
+		{5087F5DF-F5BC-47FA-B1FF-DFCFF6C69E3B}.Release|x64.Build.0 = Release|Any CPU
+		{5087F5DF-F5BC-47FA-B1FF-DFCFF6C69E3B}.Release|x86.ActiveCfg = Release|Any CPU
+		{5087F5DF-F5BC-47FA-B1FF-DFCFF6C69E3B}.Release|x86.Build.0 = Release|Any CPU
+		{ABC5C790-ACFC-4AC7-92CA-E3A49AB97C3D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{ABC5C790-ACFC-4AC7-92CA-E3A49AB97C3D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{ABC5C790-ACFC-4AC7-92CA-E3A49AB97C3D}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{ABC5C790-ACFC-4AC7-92CA-E3A49AB97C3D}.Debug|x64.Build.0 = Debug|Any CPU
+		{ABC5C790-ACFC-4AC7-92CA-E3A49AB97C3D}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{ABC5C790-ACFC-4AC7-92CA-E3A49AB97C3D}.Debug|x86.Build.0 = Debug|Any CPU
+		{ABC5C790-ACFC-4AC7-92CA-E3A49AB97C3D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{ABC5C790-ACFC-4AC7-92CA-E3A49AB97C3D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{ABC5C790-ACFC-4AC7-92CA-E3A49AB97C3D}.Release|x64.ActiveCfg = Release|Any CPU
+		{ABC5C790-ACFC-4AC7-92CA-E3A49AB97C3D}.Release|x64.Build.0 = Release|Any CPU
+		{ABC5C790-ACFC-4AC7-92CA-E3A49AB97C3D}.Release|x86.ActiveCfg = Release|Any CPU
+		{ABC5C790-ACFC-4AC7-92CA-E3A49AB97C3D}.Release|x86.Build.0 = Release|Any CPU
+		{F98A334F-7D41-4B10-BD14-0D43A9BEB8C9}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F98A334F-7D41-4B10-BD14-0D43A9BEB8C9}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F98A334F-7D41-4B10-BD14-0D43A9BEB8C9}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{F98A334F-7D41-4B10-BD14-0D43A9BEB8C9}.Debug|x64.Build.0 = Debug|Any CPU
+		{F98A334F-7D41-4B10-BD14-0D43A9BEB8C9}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{F98A334F-7D41-4B10-BD14-0D43A9BEB8C9}.Debug|x86.Build.0 = Debug|Any CPU
+		{F98A334F-7D41-4B10-BD14-0D43A9BEB8C9}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F98A334F-7D41-4B10-BD14-0D43A9BEB8C9}.Release|Any CPU.Build.0 = Release|Any CPU
+		{F98A334F-7D41-4B10-BD14-0D43A9BEB8C9}.Release|x64.ActiveCfg = Release|Any CPU
+		{F98A334F-7D41-4B10-BD14-0D43A9BEB8C9}.Release|x64.Build.0 = Release|Any CPU
+		{F98A334F-7D41-4B10-BD14-0D43A9BEB8C9}.Release|x86.ActiveCfg = Release|Any CPU
+		{F98A334F-7D41-4B10-BD14-0D43A9BEB8C9}.Release|x86.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {5ACD7685-2E51-4E54-ACAF-16230CC9B62E}
+	EndGlobalSection
+EndGlobal
