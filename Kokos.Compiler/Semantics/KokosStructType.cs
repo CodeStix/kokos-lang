@@ -13,12 +13,16 @@ public sealed class KokosStructField
 
     public KokosType Type { get; }
 
-    public KokosStructField(string? name, bool hasExplicitIndex, int ordinalPosition, KokosType type)
+    /// <summary>The modifier this field was explicitly declared with, or <see cref="KokosOwnershipKind.Inferred"/>.</summary>
+    public KokosOwnershipKind Ownership { get; }
+
+    public KokosStructField(string? name, bool hasExplicitIndex, int ordinalPosition, KokosType type, KokosOwnershipKind ownership)
     {
         Name = name;
         HasExplicitIndex = hasExplicitIndex;
         OrdinalPosition = ordinalPosition;
         Type = type;
+        Ownership = ownership;
     }
 }
 

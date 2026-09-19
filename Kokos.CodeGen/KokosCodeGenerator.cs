@@ -428,6 +428,7 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     public LLVMValueRef VisitOptionalType(KokosOptionalTypeNode node) => throw NotYet(nameof(KokosOptionalTypeNode), "Phase E");
     public LLVMValueRef VisitUnionType(KokosUnionTypeNode node) => throw NotYet(nameof(KokosUnionTypeNode), "Phase E");
     public LLVMValueRef VisitTupleType(KokosTupleTypeNode node) => throw NotYet(nameof(KokosTupleTypeNode), "Phase E");
+    public LLVMValueRef VisitModifiedType(KokosModifiedTypeNode node) => throw NotYet(nameof(KokosModifiedTypeNode), "type nodes aren't visited by codegen directly");
     public LLVMValueRef VisitTypeAlias(KokosTypeAliasNode node) => throw NotYet(nameof(KokosTypeAliasNode), "declarations aren't codegen'd directly, only referenced through resolved types");
     public LLVMValueRef VisitEnumDecl(KokosEnumDeclNode node) => throw NotYet(nameof(KokosEnumDeclNode), "Phase E");
     public LLVMValueRef VisitEnumVariant(KokosEnumVariantNode node) => throw NotYet(nameof(KokosEnumVariantNode), "Phase E");
@@ -435,4 +436,5 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     public LLVMValueRef VisitField(KokosFieldNode node) => throw NotYet(nameof(KokosFieldNode), "Phase E");
     public LLVMValueRef VisitLiteralString(KokosLiteralStringNode node) => throw NotYet(nameof(KokosLiteralStringNode), "needs a string runtime representation, Phase E");
     public LLVMValueRef VisitMemberAccess(KokosMemberAccessNode node) => throw NotYet(nameof(KokosMemberAccessNode), "needs struct codegen, Phase E");
+    public LLVMValueRef VisitDestroyedExpression(KokosDestroyedExpressionNode node) => throw NotYet(nameof(KokosDestroyedExpressionNode), "Phase E — needs generational-reference runtime support");
 }

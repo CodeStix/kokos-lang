@@ -31,6 +31,10 @@ public sealed class KokosTokenizer
         ["then"] = TokenKind.ThenKeyword,
         ["true"] = TokenKind.TrueKeyword,
         ["false"] = TokenKind.FalseKeyword,
+        ["owned"] = TokenKind.OwnedKeyword,
+        ["unowned"] = TokenKind.UnownedKeyword,
+        ["manual"] = TokenKind.ManualKeyword,
+        ["destroyed"] = TokenKind.DestroyedKeyword,
     };
 
     private readonly string _source;

@@ -40,6 +40,10 @@ public class TokenizerTests
     [InlineData("then")]
     [InlineData("true")]
     [InlineData("false")]
+    [InlineData("owned")]
+    [InlineData("unowned")]
+    [InlineData("manual")]
+    [InlineData("destroyed")]
     public void Recognizes_keyword(string text)
     {
         var tokens = new KokosTokenizer(text).Tokenize();

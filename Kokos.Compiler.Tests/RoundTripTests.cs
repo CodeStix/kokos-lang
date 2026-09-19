@@ -120,6 +120,29 @@ public class RoundTripTests
         yield return ["function f(): Bool { return true; }"];
         yield return ["function f(): Bool { return false; }"];
         yield return ["function f(a: Int, b: Int): Bool { return a == b && a != b || a >= b; }"];
+
+        // Phase C: owned/unowned/manual modifiers, destroyed(...).
+        yield return ["function f(p: unowned Person): Int { return 0; }"];
+        yield return ["function f(): owned Person { return f(); }"];
+        yield return ["function f() { let p: manual Person = f(); }"];
+        yield return ["function f(p: [owned Person]): Int { return 0; }"];
+        yield return ["function f(p: unowned Person?): Int { return 0; }"];
+        yield return ["""
+            struct Node {
+                data: Int,
+                next: unowned Node
+            }
+            """];
+        yield return ["function f(p: unowned Person): Bool { return destroyed(p); }"];
+        yield return ["""
+            function check(p: unowned Person): Int {
+                if destroyed(p) {
+                    return 0;
+                }
+                return 1;
+            }
+            """];
+        yield return ["function f(p: unowned Person): Bool { return destroyed(p) && true; }"];
     }
 
     [Theory]

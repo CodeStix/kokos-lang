@@ -138,6 +138,39 @@ public class TypeResolverTests
     }
 
     [Fact]
+    public void Field_declared_unowned_resolves_to_the_same_type_as_an_unannotated_field_and_records_ownership()
+    {
+        var (unit, _, resolver, diagnostics) = Setup(
+            """
+            struct Node {
+                data: Int,
+                next: unowned Node
+            }
+            """);
+        var structType = (KokosStructType)resolver.ResolveStruct((KokosStructDeclNode)unit.Members[0]);
+
+        Assert.False(diagnostics.HasErrors);
+        var nextField = structType.FindField("next")!;
+        Assert.Same(structType, nextField.Type);
+        Assert.Equal(KokosOwnershipKind.Unowned, nextField.Ownership);
+
+        var dataField = structType.FindField("data")!;
+        Assert.Equal(KokosOwnershipKind.Inferred, dataField.Ownership);
+    }
+
+    [Fact]
+    public void Modifier_on_a_value_shaped_field_type_is_accepted_without_diagnostics()
+    {
+        var (unit, _, resolver, diagnostics) = Setup("struct Holder { count: owned Int }");
+        var structType = (KokosStructType)resolver.ResolveStruct((KokosStructDeclNode)unit.Members[0]);
+
+        Assert.False(diagnostics.HasErrors);
+        var field = structType.FindField("count")!;
+        Assert.Same(KokosPrimitiveType.Int, field.Type);
+        Assert.Equal(KokosOwnershipKind.Owned, field.Ownership);
+    }
+
+    [Fact]
     public void Struct_with_no_declared_indices_does_not_support_positional_construction()
     {
         var (unit, _, resolver, diagnostics) = Setup("struct Person { name: Int, age: Int }");

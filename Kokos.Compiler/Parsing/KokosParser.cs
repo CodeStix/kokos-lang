@@ -189,7 +189,16 @@ public sealed class KokosParser
 
     // --- Types (precedence climbing, mirroring the expression chain below) -----
 
-    private KokosTypeNode ParseType() => ParseUnionType();
+    private KokosTypeNode ParseType()
+    {
+        if (Current.Kind is TokenKind.OwnedKeyword or TokenKind.UnownedKeyword or TokenKind.ManualKeyword)
+        {
+            var modifierToken = Advance();
+            return new KokosModifiedTypeNode(modifierToken, ParseUnionType());
+        }
+
+        return ParseUnionType();
+    }
 
     private KokosTypeNode ParseUnionType()
     {
@@ -509,6 +518,15 @@ public sealed class KokosParser
                 var inner = ParseExpression();
                 var close = Expect(TokenKind.CloseParen, "')'");
                 return new KokosParenthesizedExpressionNode(open, inner, close);
+            }
+
+            case TokenKind.DestroyedKeyword:
+            {
+                var destroyedKeyword = Advance();
+                var openParen = Expect(TokenKind.OpenParen, "'('");
+                var operand = ParseExpression();
+                var closeParen = Expect(TokenKind.CloseParen, "')'");
+                return new KokosDestroyedExpressionNode(destroyedKeyword, openParen, operand, closeParen);
             }
 
             default:

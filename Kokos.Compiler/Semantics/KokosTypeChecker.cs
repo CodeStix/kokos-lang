@@ -38,9 +38,22 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
     /// <summary>Every expression's resolved type, keyed by node — consumed by codegen so it never re-derives what this checker already decided.</summary>
     public IReadOnlyDictionary<KokosExpressionNode, KokosType> ExpressionTypes => _expressionTypes;
 
+    /// <summary>A name's resolved type plus the ownership modifier it was explicitly declared with (if any).</summary>
+    private sealed class KokosBinding
+    {
+        public KokosType Type { get; }
+        public KokosOwnershipKind Ownership { get; }
+
+        public KokosBinding(KokosType type, KokosOwnershipKind ownership)
+        {
+            Type = type;
+            Ownership = ownership;
+        }
+    }
+
     // Saved/restored around every (possibly re-entrant, via a forward-referencing call) function
     // check — see CheckFunctionCore.
-    private Dictionary<string, KokosType> _scope = new();
+    private Dictionary<string, KokosBinding> _scope = new();
     private KokosType? _currentDeclaredReturnType;
     private List<KokosType> _currentReturnTypes = new();
     private KokosType? _expectedType;
@@ -153,7 +166,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         var outerDeclaredReturnType = _currentDeclaredReturnType;
         var outerReturnTypes = _currentReturnTypes;
 
-        _scope = new Dictionary<string, KokosType>();
+        _scope = new Dictionary<string, KokosBinding>();
         _currentReturnTypes = [];
 
         var parameterTypes = new List<KokosType>();
@@ -161,7 +174,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         {
             var paramType = _resolver.Resolve(parameter.Type);
             parameterTypes.Add(paramType);
-            _scope[parameter.Name] = paramType;
+            _scope[parameter.Name] = new KokosBinding(paramType, KokosModifierMapper.OwnershipOf(parameter.Type));
         }
 
         _currentDeclaredReturnType = node.ReturnType is null ? null : _resolver.Resolve(node.ReturnType);
@@ -215,6 +228,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
     public KokosType VisitOptionalType(KokosOptionalTypeNode node) => _resolver.Resolve(node);
     public KokosType VisitUnionType(KokosUnionTypeNode node) => _resolver.Resolve(node);
     public KokosType VisitTupleType(KokosTupleTypeNode node) => _resolver.Resolve(node);
+    public KokosType VisitModifiedType(KokosModifiedTypeNode node) => _resolver.Resolve(node);
     public KokosType VisitTypeAlias(KokosTypeAliasNode node) => _resolver.ResolveTypeAlias(node);
     public KokosType VisitEnumDecl(KokosEnumDeclNode node) => _resolver.ResolveEnum(node);
     public KokosType VisitStructDecl(KokosStructDeclNode node) => _resolver.ResolveStruct(node);
@@ -247,7 +261,8 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         }
 
         var variableType = expected ?? initializerType;
-        _scope[node.Name] = variableType;
+        var ownership = node.Type is null ? KokosOwnershipKind.Inferred : KokosModifierMapper.OwnershipOf(node.Type);
+        _scope[node.Name] = new KokosBinding(variableType, ownership);
         return variableType;
     }
 
@@ -324,8 +339,8 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
 
     public KokosType VisitIdentifier(KokosIdentifierNode node)
     {
-        if (_scope.TryGetValue(node.Name, out var type))
-            return type;
+        if (_scope.TryGetValue(node.Name, out var binding))
+            return binding.Type;
 
         _diagnostics.ReportError(node.NameToken.Span, $"Unknown identifier '{node.Name}'.");
         return KokosErrorType.Instance;
@@ -450,6 +465,71 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         _diagnostics.ReportError(node.OperatorToken.Span,
             $"Operator '{node.OperatorToken.Text}' cannot be applied to an operand of type '{operandType.DisplayName}'.");
         return KokosErrorType.Instance;
+    }
+
+    /// <summary>
+    /// The staleness check <c>destroyed(x)</c>. Phase C only recognizes an operand it can trace
+    /// straight back to a declared binding — a plain identifier or a direct struct-field access —
+    /// since there's no move/escape-analysis checker yet (Phase D) to reason about anything more
+    /// general. An unannotated ('inferred') binding is treated the same as 'owned' here: Phase C
+    /// doesn't compute the spec's real defaults, so it can't yet justify calling anything
+    /// non-owning unless the program says so explicitly.
+    /// </summary>
+    public KokosType VisitDestroyedExpression(KokosDestroyedExpressionNode node)
+    {
+        var operandType = TypeOf(node.Operand);
+
+        if (operandType is KokosUnknownType or KokosErrorType)
+            return operandType;
+
+        if (!operandType.IsPointerShaped)
+        {
+            _diagnostics.ReportError(node.DestroyedKeyword.Span,
+                $"'destroyed()' requires a reference type, but '{operandType.DisplayName}' is a value type.");
+            return KokosErrorType.Instance;
+        }
+
+        if (!TryGetDeclaredOwnership(node.Operand, out var ownership))
+        {
+            _diagnostics.ReportError(node.DestroyedKeyword.Span,
+                "'destroyed()' can only be applied to a local variable, parameter, or field explicitly declared 'unowned' or 'manual'.");
+            return KokosErrorType.Instance;
+        }
+
+        if (ownership is KokosOwnershipKind.Owned or KokosOwnershipKind.Inferred)
+        {
+            _diagnostics.ReportError(node.DestroyedKeyword.Span,
+                "'destroyed()' requires an 'unowned' or 'manual' reference; this binding is always valid.");
+            return KokosErrorType.Instance;
+        }
+
+        return KokosBoolType.Instance;
+    }
+
+    private bool TryGetDeclaredOwnership(KokosExpressionNode expression, out KokosOwnershipKind ownership)
+    {
+        if (expression is KokosIdentifierNode identifier && _scope.TryGetValue(identifier.Name, out var binding))
+        {
+            ownership = binding.Ownership;
+            return true;
+        }
+
+        if (expression is KokosMemberAccessNode access && _expressionTypes.TryGetValue(access.Target, out var targetType)
+            && targetType is KokosStructType structType)
+        {
+            var field = access.NameToken.Kind == TokenKind.NumberLiteral
+                ? (int.TryParse(access.MemberName, out var ordinal) ? structType.FindField(ordinal) : null)
+                : structType.FindField(access.MemberName);
+
+            if (field is not null)
+            {
+                ownership = field.Ownership;
+                return true;
+            }
+        }
+
+        ownership = KokosOwnershipKind.Inferred;
+        return false;
     }
 
     public KokosType VisitAssignment(KokosAssignmentNode node)

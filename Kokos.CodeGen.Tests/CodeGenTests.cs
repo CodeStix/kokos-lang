@@ -175,6 +175,19 @@ public class CodeGenTests
     }
 
     [Fact]
+    public void Ownership_modifiers_are_erased_before_codegen_and_dont_affect_the_result()
+    {
+        // Phase C only makes owned/unowned/manual parseable and minimally type-checked — the
+        // modifier is erased back to the plain resolved type by KokosTypeResolver, so a modified
+        // parameter/return type codegens identically to an unannotated one today.
+        using var jit = GenerateAndJit("function identity(x: unowned Int): owned Int { return x; }");
+
+        var identity = jit.GetFunction<UnaryLongFunc>("identity");
+
+        Assert.Equal(42, identity(42));
+    }
+
+    [Fact]
     public void Ternary_picks_the_correct_branch_in_both_directions()
     {
         // The condition is computed and consumed entirely inside the JIT-compiled function — Bool

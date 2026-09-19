@@ -18,6 +18,7 @@ public interface IKokosVisitor<out T>
     T VisitOptionalType(KokosOptionalTypeNode node);
     T VisitUnionType(KokosUnionTypeNode node);
     T VisitTupleType(KokosTupleTypeNode node);
+    T VisitModifiedType(KokosModifiedTypeNode node);
     T VisitBlock(KokosBlockNode node);
     T VisitVarDecl(KokosVarDeclNode node);
     T VisitReturn(KokosReturnNode node);
@@ -36,6 +37,7 @@ public interface IKokosVisitor<out T>
     T VisitCall(KokosCallNode node);
     T VisitArgument(KokosArgumentNode node);
     T VisitParenthesized(KokosParenthesizedExpressionNode node);
+    T VisitDestroyedExpression(KokosDestroyedExpressionNode node);
     T VisitTypeAlias(KokosTypeAliasNode node);
     T VisitEnumDecl(KokosEnumDeclNode node);
     T VisitEnumVariant(KokosEnumVariantNode node);

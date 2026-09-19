@@ -99,6 +99,9 @@ public sealed class KokosFormatter : IKokosVisitor<string>
         return $"{valuePrefix}({fields})";
     }
 
+    public string VisitModifiedType(KokosModifiedTypeNode node) =>
+        $"{node.ModifierToken.Text} {node.InnerType.Accept(this)}";
+
     public string VisitBlock(KokosBlockNode node)
     {
         if (node.Statements.Count == 0)
@@ -191,4 +194,7 @@ public sealed class KokosFormatter : IKokosVisitor<string>
 
     public string VisitConditionalExpression(KokosConditionalExpressionNode node) =>
         $"{node.Condition.Accept(this)} then {node.TrueValue.Accept(this)} else {node.FalseValue.Accept(this)}";
+
+    public string VisitDestroyedExpression(KokosDestroyedExpressionNode node) =>
+        $"destroyed({node.Operand.Accept(this)})";
 }

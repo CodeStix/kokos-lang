@@ -26,6 +26,10 @@ public enum TokenKind
     ThenKeyword,
     TrueKeyword,
     FalseKeyword,
+    OwnedKeyword,
+    UnownedKeyword,
+    ManualKeyword,
+    DestroyedKeyword,
 
     // Punctuation
     OpenParen,

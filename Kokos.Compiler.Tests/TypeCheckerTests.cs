@@ -259,6 +259,106 @@ public class TypeCheckerTests
         Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
     }
 
+    // --- Ownership modifiers / destroyed(...) -----------------------------------------------------
+
+    [Fact]
+    public void Destroyed_on_an_explicitly_unowned_parameter_produces_bool()
+    {
+        var (unit, _, checker, diagnostics) = Setup(
+            "struct Person { age: Int } function f(p: unowned Person): Bool { return destroyed(p); }");
+        var functionType = CheckFunction(checker, unit, memberIndex: 1);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+        Assert.Same(KokosBoolType.Instance, functionType.ReturnType);
+    }
+
+    [Fact]
+    public void Destroyed_on_an_explicitly_manual_parameter_produces_bool()
+    {
+        var (unit, _, checker, diagnostics) = Setup(
+            "struct Person { age: Int } function f(p: manual Person): Bool { return destroyed(p); }");
+        var functionType = CheckFunction(checker, unit, memberIndex: 1);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+        Assert.Same(KokosBoolType.Instance, functionType.ReturnType);
+    }
+
+    [Fact]
+    public void Destroyed_on_an_owned_parameter_is_a_diagnostic()
+    {
+        var (unit, _, checker, diagnostics) = Setup(
+            "struct Person { age: Int } function f(p: owned Person): Bool { return destroyed(p); }");
+        CheckFunction(checker, unit, memberIndex: 1);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Destroyed_on_an_unannotated_parameter_is_a_diagnostic()
+    {
+        // No real default-modifier inference yet (Phase D) — an unannotated binding is
+        // conservatively treated the same as 'owned'.
+        var (unit, _, checker, diagnostics) = Setup(
+            "struct Person { age: Int } function f(p: Person): Bool { return destroyed(p); }");
+        CheckFunction(checker, unit, memberIndex: 1);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Destroyed_on_a_value_type_is_a_diagnostic()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f(x: unowned Int): Bool { return destroyed(x); }");
+        CheckFunction(checker, unit);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Destroyed_on_a_struct_field_declared_unowned_succeeds()
+    {
+        const string source = """
+            struct Node {
+                data: Int,
+                next: unowned Node
+            }
+
+            function f(n: unowned Node): Bool { return destroyed(n.next); }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        var functionType = CheckFunction(checker, unit, memberIndex: 1);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+        Assert.Same(KokosBoolType.Instance, functionType.ReturnType);
+    }
+
+    [Fact]
+    public void Destroyed_on_a_call_result_is_a_diagnostic()
+    {
+        const string source = """
+            struct Person { age: Int }
+
+            function forward(p: unowned Person): unowned Person { return p; }
+            function f(p: unowned Person): Bool { return destroyed(forward(p)); }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[2]);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Destroyed_used_directly_as_an_if_condition_type_checks_cleanly()
+    {
+        var (unit, _, checker, diagnostics) = Setup(
+            "struct Person { age: Int } function f(p: unowned Person): Int { if destroyed(p) { return 0; } return 1; }");
+        CheckFunction(checker, unit, memberIndex: 1);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
     // --- Contextual typing -----------------------------------------------------------------------
 
     [Fact]

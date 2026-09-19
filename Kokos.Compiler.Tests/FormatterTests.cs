@@ -345,4 +345,53 @@ public class FormatterTests
             """,
             KokosFormatter.Format(unit));
     }
+
+    [Fact]
+    public void Normalizes_modifier_and_type_spacing()
+    {
+        var unit = KokosParser.Parse("function f(p:unowned   Person):owned    Person{return p;}", out var diagnostics);
+        Assert.False(diagnostics.HasErrors);
+
+        Assert.Equal(
+            """
+            function f(p: unowned Person): owned Person {
+                return p;
+            }
+
+            """,
+            KokosFormatter.Format(unit));
+    }
+
+    [Fact]
+    public void Formats_a_modifier_composed_with_an_array_type()
+    {
+        var unit = KokosParser.Parse("function f(p:[owned   Person]):Int{return 0;}", out var diagnostics);
+        Assert.False(diagnostics.HasErrors);
+
+        Assert.Equal(
+            """
+            function f(p: [owned Person]): Int {
+                return 0;
+            }
+
+            """,
+            KokosFormatter.Format(unit));
+    }
+
+    [Fact]
+    public void Formats_a_destroyed_expression()
+    {
+        var unit = KokosParser.Parse(
+            "function f(p:unowned Person):Bool{return destroyed(  p  );}", out var diagnostics);
+        Assert.False(diagnostics.HasErrors);
+
+        Assert.Equal(
+            """
+            function f(p: unowned Person): Bool {
+                return destroyed(p);
+            }
+
+            """,
+            KokosFormatter.Format(unit));
+    }
 }

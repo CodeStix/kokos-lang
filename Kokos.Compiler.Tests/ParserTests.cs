@@ -504,4 +504,85 @@ public class ParserTests
         var unary = Assert.IsType<KokosUnaryOperatorNode>(returnStatement.Expression);
         Assert.Equal("!", unary.OperatorToken.Text);
     }
+
+    [Fact]
+    public void Parses_an_unowned_modifier_on_a_parameter()
+    {
+        var unit = KokosParser.Parse("function f(p: unowned Person): Int { return 0; }", out var diagnostics);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+
+        var parameter = unit.Functions[0].Parameters.Items[0];
+        var modified = Assert.IsType<KokosModifiedTypeNode>(parameter.Type);
+        Assert.Equal("unowned", modified.ModifierToken.Text);
+        var inner = Assert.IsType<KokosNamedTypeNode>(modified.InnerType);
+        Assert.Equal("Person", inner.Name);
+    }
+
+    [Fact]
+    public void Parses_an_owned_modifier_on_a_return_type()
+    {
+        var unit = KokosParser.Parse("function f(): owned Person { return 0; }", out var diagnostics);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+
+        var modified = Assert.IsType<KokosModifiedTypeNode>(unit.Functions[0].ReturnType);
+        Assert.Equal("owned", modified.ModifierToken.Text);
+    }
+
+    [Fact]
+    public void Parses_a_manual_modifier_on_a_let_annotation()
+    {
+        var unit = KokosParser.Parse("function f() { let p: manual Person = 0; }", out var diagnostics);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+
+        var varDecl = Assert.IsType<KokosVarDeclNode>(unit.Functions[0].Body.Statements[0]);
+        var modified = Assert.IsType<KokosModifiedTypeNode>(varDecl.Type);
+        Assert.Equal("manual", modified.ModifierToken.Text);
+    }
+
+    [Fact]
+    public void Modifier_composes_with_an_array_element_type()
+    {
+        var unit = KokosParser.Parse("function f(p: [owned Person]): Int { return 0; }", out var diagnostics);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+
+        var parameter = unit.Functions[0].Parameters.Items[0];
+        var arrayType = Assert.IsType<KokosArrayTypeNode>(parameter.Type);
+        var modified = Assert.IsType<KokosModifiedTypeNode>(arrayType.ElementType);
+        Assert.Equal("owned", modified.ModifierToken.Text);
+    }
+
+    [Fact]
+    public void Modifier_wraps_an_optional_type()
+    {
+        var unit = KokosParser.Parse("function f(p: unowned Person?): Int { return 0; }", out var diagnostics);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+
+        var parameter = unit.Functions[0].Parameters.Items[0];
+        var modified = Assert.IsType<KokosModifiedTypeNode>(parameter.Type);
+        Assert.IsType<KokosOptionalTypeNode>(modified.InnerType);
+    }
+
+    [Fact]
+    public void Parses_a_destroyed_expression()
+    {
+        var unit = KokosParser.Parse(
+            "function f(p: unowned Person): Bool { return destroyed(p); }", out var diagnostics);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+
+        var returnStatement = Assert.IsType<KokosReturnNode>(unit.Functions[0].Body.Statements[0]);
+        var destroyedExpr = Assert.IsType<KokosDestroyedExpressionNode>(returnStatement.Expression);
+        var operand = Assert.IsType<KokosIdentifierNode>(destroyedExpr.Operand);
+        Assert.Equal("p", operand.Name);
+    }
+
+    [Fact]
+    public void Parses_destroyed_as_an_if_condition()
+    {
+        var unit = KokosParser.Parse(
+            "function f(p: unowned Person): Int { if destroyed(p) { return 1; } return 0; }", out var diagnostics);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+
+        var ifStatement = Assert.IsType<KokosIfStatementNode>(unit.Functions[0].Body.Statements[0]);
+        Assert.IsType<KokosDestroyedExpressionNode>(ifStatement.Condition);
+    }
 }

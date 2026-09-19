@@ -167,7 +167,8 @@ public sealed class KokosTypeResolver : IKokosVisitor<KokosType>
         {
             var fieldNode = fieldNodes[i];
             var type = Resolve(fieldNode.Type);
-            fields.Add(new KokosStructField(fieldNode.Name, fieldNode.IndexToken is not null, i, type));
+            var ownership = KokosModifierMapper.OwnershipOf(fieldNode.Type);
+            fields.Add(new KokosStructField(fieldNode.Name, fieldNode.IndexToken is not null, i, type, ownership));
         }
 
         return fields;
@@ -233,6 +234,11 @@ public sealed class KokosTypeResolver : IKokosVisitor<KokosType>
     public KokosType VisitUnionType(KokosUnionTypeNode node) =>
         Intern(new KokosUnionType(node.Members.Items.Select(Resolve).ToList()));
 
+    // An ownership modifier is an annotation on a binding, not part of type identity — it erases
+    // straight through to the same KokosType instance either way. KokosTypeChecker/KokosModifierMapper
+    // are what actually record which modifier a given declaration used.
+    public KokosType VisitModifiedType(KokosModifiedTypeNode node) => Resolve(node.InnerType);
+
     public KokosType VisitTupleType(KokosTupleTypeNode node)
     {
         var fields = ResolveFields(node.Fields.Items);
@@ -265,6 +271,7 @@ public sealed class KokosTypeResolver : IKokosVisitor<KokosType>
     public KokosType VisitCall(KokosCallNode node) => throw NotAType(nameof(KokosCallNode));
     public KokosType VisitArgument(KokosArgumentNode node) => throw NotAType(nameof(KokosArgumentNode));
     public KokosType VisitParenthesized(KokosParenthesizedExpressionNode node) => throw NotAType(nameof(KokosParenthesizedExpressionNode));
+    public KokosType VisitDestroyedExpression(KokosDestroyedExpressionNode node) => throw NotAType(nameof(KokosDestroyedExpressionNode));
     public KokosType VisitTypeAlias(KokosTypeAliasNode node) => throw NotAType(nameof(KokosTypeAliasNode));
     public KokosType VisitEnumDecl(KokosEnumDeclNode node) => throw NotAType(nameof(KokosEnumDeclNode));
     public KokosType VisitEnumVariant(KokosEnumVariantNode node) => throw NotAType(nameof(KokosEnumVariantNode));
