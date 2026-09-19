@@ -174,7 +174,8 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         {
             var paramType = _resolver.Resolve(parameter.Type);
             parameterTypes.Add(paramType);
-            _scope[parameter.Name] = new KokosBinding(paramType, KokosModifierMapper.OwnershipOf(parameter.Type));
+            var ownership = KokosModifierMapper.OwnershipOf(parameter.Type, paramType, KokosOwnershipKind.Unowned);
+            _scope[parameter.Name] = new KokosBinding(paramType, ownership);
         }
 
         _currentDeclaredReturnType = node.ReturnType is null ? null : _resolver.Resolve(node.ReturnType);

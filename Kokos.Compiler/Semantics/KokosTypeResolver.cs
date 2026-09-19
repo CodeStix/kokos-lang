@@ -167,7 +167,7 @@ public sealed class KokosTypeResolver : IKokosVisitor<KokosType>
         {
             var fieldNode = fieldNodes[i];
             var type = Resolve(fieldNode.Type);
-            var ownership = KokosModifierMapper.OwnershipOf(fieldNode.Type);
+            var ownership = KokosModifierMapper.OwnershipOf(fieldNode.Type, type, KokosOwnershipKind.Owned);
             fields.Add(new KokosStructField(fieldNode.Name, fieldNode.IndexToken is not null, i, type, ownership));
         }
 
@@ -236,8 +236,22 @@ public sealed class KokosTypeResolver : IKokosVisitor<KokosType>
 
     // An ownership modifier is an annotation on a binding, not part of type identity — it erases
     // straight through to the same KokosType instance either way. KokosTypeChecker/KokosModifierMapper
-    // are what actually record which modifier a given declaration used.
-    public KokosType VisitModifiedType(KokosModifiedTypeNode node) => Resolve(node.InnerType);
+    // are what actually record which modifier a given declaration used. It's only ever legal on a
+    // type that requires a pointer to be passed around — a value type (primitives, value structs, an
+    // optional/union of one) is always copied, so there's no pointer for the modifier to describe.
+    public KokosType VisitModifiedType(KokosModifiedTypeNode node)
+    {
+        var innerType = Resolve(node.InnerType);
+
+        if (innerType is not (KokosUnknownType or KokosErrorType) && !innerType.IsPointerShaped)
+        {
+            _diagnostics.ReportError(node.ModifierToken.Span,
+                $"'{node.ModifierToken.Text}' can only modify a type that requires a pointer to be passed " +
+                $"around, but '{innerType.DisplayName}' is a value type.");
+        }
+
+        return innerType;
+    }
 
     public KokosType VisitTupleType(KokosTupleTypeNode node)
     {

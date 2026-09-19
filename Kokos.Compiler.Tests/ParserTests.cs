@@ -552,14 +552,33 @@ public class ParserTests
     }
 
     [Fact]
-    public void Modifier_wraps_an_optional_type()
+    public void Modifier_binds_to_the_atomic_type_before_the_optional_suffix_is_applied()
     {
+        // "unowned Person?" binds the modifier to Person first, then the trailing '?' wraps the
+        // whole modified type — Optional(Modified(Unowned, Person)), not the reverse.
         var unit = KokosParser.Parse("function f(p: unowned Person?): Int { return 0; }", out var diagnostics);
         Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
 
         var parameter = unit.Functions[0].Parameters.Items[0];
-        var modified = Assert.IsType<KokosModifiedTypeNode>(parameter.Type);
-        Assert.IsType<KokosOptionalTypeNode>(modified.InnerType);
+        var optional = Assert.IsType<KokosOptionalTypeNode>(parameter.Type);
+        var modified = Assert.IsType<KokosModifiedTypeNode>(optional.InnerType);
+        Assert.Equal("unowned", modified.ModifierToken.Text);
+        Assert.IsType<KokosNamedTypeNode>(modified.InnerType);
+    }
+
+    [Fact]
+    public void Each_union_member_can_carry_its_own_independent_modifier()
+    {
+        var unit = KokosParser.Parse(
+            "function f(p: owned Person|unowned Fruit): Int { return 0; }", out var diagnostics);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+
+        var parameter = unit.Functions[0].Parameters.Items[0];
+        var union = Assert.IsType<KokosUnionTypeNode>(parameter.Type);
+        var first = Assert.IsType<KokosModifiedTypeNode>(union.Members.Items[0]);
+        Assert.Equal("owned", first.ModifierToken.Text);
+        var second = Assert.IsType<KokosModifiedTypeNode>(union.Members.Items[1]);
+        Assert.Equal("unowned", second.ModifierToken.Text);
     }
 
     [Fact]

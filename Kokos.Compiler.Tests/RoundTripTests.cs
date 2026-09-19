@@ -143,6 +143,11 @@ public class RoundTripTests
             }
             """];
         yield return ["function f(p: unowned Person): Bool { return destroyed(p) && true; }"];
+
+        // Phase D: modifier binds per-atomic-type, so each union member can carry its own.
+        yield return ["function f(p: owned Person|unowned Fruit): Int { return 0; }"];
+        yield return ["function f(p: length(100) [Int8]): Int { return 0; }"];
+        yield return ["function f(p: owned length(100) [Int8]): Int { return 0; }"];
     }
 
     [Theory]

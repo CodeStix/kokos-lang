@@ -189,16 +189,7 @@ public sealed class KokosParser
 
     // --- Types (precedence climbing, mirroring the expression chain below) -----
 
-    private KokosTypeNode ParseType()
-    {
-        if (Current.Kind is TokenKind.OwnedKeyword or TokenKind.UnownedKeyword or TokenKind.ManualKeyword)
-        {
-            var modifierToken = Advance();
-            return new KokosModifiedTypeNode(modifierToken, ParseUnionType());
-        }
-
-        return ParseUnionType();
-    }
+    private KokosTypeNode ParseType() => ParseUnionType();
 
     private KokosTypeNode ParseUnionType()
     {
@@ -219,7 +210,7 @@ public sealed class KokosParser
 
     private KokosTypeNode ParseOptionalType()
     {
-        var type = ParseAtomicType();
+        var type = ParseModifiedType();
 
         if (Current.Kind == TokenKind.Question)
         {
@@ -228,6 +219,23 @@ public sealed class KokosParser
         }
 
         return type;
+    }
+
+    /// <summary>
+    /// The modifier binds to a single atomic type, not the whole expression around it — this is what
+    /// lets each member of a union carry its own independent modifier (<c>owned Person|unowned
+    /// Fruit</c>), since <see cref="ParseUnionType"/> calls <see cref="ParseOptionalType"/> (and thus
+    /// this) once per member.
+    /// </summary>
+    private KokosTypeNode ParseModifiedType()
+    {
+        if (Current.Kind is TokenKind.OwnedKeyword or TokenKind.UnownedKeyword or TokenKind.ManualKeyword)
+        {
+            var modifierToken = Advance();
+            return new KokosModifiedTypeNode(modifierToken, ParseAtomicType());
+        }
+
+        return ParseAtomicType();
     }
 
     private KokosTypeNode ParseAtomicType()

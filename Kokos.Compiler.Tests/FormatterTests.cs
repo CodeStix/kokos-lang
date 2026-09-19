@@ -379,6 +379,23 @@ public class FormatterTests
     }
 
     [Fact]
+    public void Formats_a_union_with_independently_modified_members()
+    {
+        var unit = KokosParser.Parse(
+            "function f(p:owned   Person|unowned   Fruit):Int{return 0;}", out var diagnostics);
+        Assert.False(diagnostics.HasErrors);
+
+        Assert.Equal(
+            """
+            function f(p: owned Person|unowned Fruit): Int {
+                return 0;
+            }
+
+            """,
+            KokosFormatter.Format(unit));
+    }
+
+    [Fact]
     public void Formats_a_destroyed_expression()
     {
         var unit = KokosParser.Parse(

@@ -154,20 +154,92 @@ public class TypeResolverTests
         Assert.Same(structType, nextField.Type);
         Assert.Equal(KokosOwnershipKind.Unowned, nextField.Ownership);
 
+        // A value-shaped field (Int isn't pointer-shaped) has no ownership concept to default at all.
         var dataField = structType.FindField("data")!;
         Assert.Equal(KokosOwnershipKind.Inferred, dataField.Ownership);
     }
 
     [Fact]
-    public void Modifier_on_a_value_shaped_field_type_is_accepted_without_diagnostics()
+    public void Unannotated_pointer_shaped_field_defaults_to_owned()
     {
-        var (unit, _, resolver, diagnostics) = Setup("struct Holder { count: owned Int }");
+        var (unit, _, resolver, diagnostics) = Setup(
+            """
+            struct Node {
+                self: Node
+            }
+            """);
         var structType = (KokosStructType)resolver.ResolveStruct((KokosStructDeclNode)unit.Members[0]);
 
         Assert.False(diagnostics.HasErrors);
-        var field = structType.FindField("count")!;
-        Assert.Same(KokosPrimitiveType.Int, field.Type);
+        var field = structType.FindField("self")!;
         Assert.Equal(KokosOwnershipKind.Owned, field.Ownership);
+    }
+
+    [Fact]
+    public void Modifier_on_a_value_shaped_field_type_is_a_diagnostic()
+    {
+        var (unit, _, resolver, diagnostics) = Setup("struct Holder { count: owned Int }");
+        resolver.ResolveStruct((KokosStructDeclNode)unit.Members[0]);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Modifier_on_a_value_struct_is_a_diagnostic()
+    {
+        var (unit, _, resolver, diagnostics) = Setup(
+            """
+            value struct Ip { part0: UInt8 }
+            struct Holder { ip: unowned Ip }
+            """);
+        resolver.ResolveStruct((KokosStructDeclNode)unit.Members[1]);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Modifier_on_a_value_tuple_alias_is_a_diagnostic()
+    {
+        var (unit, _, resolver, diagnostics) = Setup(
+            """
+            type Vector3 = value (Int, Int, Int);
+            struct Holder { v: manual Vector3 }
+            """);
+        resolver.ResolveStruct((KokosStructDeclNode)unit.Members[1]);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Modifier_composes_with_an_array_optional_and_fixed_length_array_without_diagnostics()
+    {
+        var (unit, _, resolver, diagnostics) = Setup(
+            """
+            struct Person { age: Int }
+            struct Holder {
+                a: owned [Person],
+                b: unowned Person?,
+                c: manual length(100) [Int8]
+            }
+            """);
+        resolver.ResolveStruct((KokosStructDeclNode)unit.Members[1]);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Each_union_member_can_carry_its_own_modifier()
+    {
+        var (unit, _, resolver, diagnostics) = Setup(
+            """
+            struct Person { age: Int }
+            struct Fruit { kind: Int }
+            struct Holder { pick: owned Person|unowned Fruit }
+            """);
+        var structType = (KokosStructType)resolver.ResolveStruct((KokosStructDeclNode)unit.Members[2]);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+        Assert.NotNull(structType.FindField("pick"));
     }
 
     [Fact]

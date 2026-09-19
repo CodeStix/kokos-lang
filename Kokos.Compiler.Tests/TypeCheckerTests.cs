@@ -294,12 +294,33 @@ public class TypeCheckerTests
     }
 
     [Fact]
-    public void Destroyed_on_an_unannotated_parameter_is_a_diagnostic()
+    public void Destroyed_on_an_unannotated_parameter_succeeds_via_the_unowned_default()
     {
-        // No real default-modifier inference yet (Phase D) — an unannotated binding is
-        // conservatively treated the same as 'owned'.
+        // Phase D: a function parameter with no explicit modifier defaults to 'unowned' (a real
+        // positional default, computed purely from where it appears — no escape analysis needed).
         var (unit, _, checker, diagnostics) = Setup(
             "struct Person { age: Int } function f(p: Person): Bool { return destroyed(p); }");
+        var functionType = CheckFunction(checker, unit, memberIndex: 1);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+        Assert.Same(KokosBoolType.Instance, functionType.ReturnType);
+    }
+
+    [Fact]
+    public void Destroyed_on_an_unannotated_struct_field_is_a_diagnostic()
+    {
+        // Struct fields default to 'owned' (not 'unowned', unlike parameters) — an unannotated
+        // reference-shaped field is therefore still always-valid and rejected by destroyed().
+        const string source = """
+            struct Node {
+                data: Int,
+                next: Node
+            }
+
+            function f(n: Node): Bool { return destroyed(n.next); }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
         CheckFunction(checker, unit, memberIndex: 1);
 
         Assert.True(diagnostics.HasErrors);
