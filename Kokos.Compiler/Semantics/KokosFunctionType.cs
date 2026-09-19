@@ -11,13 +11,20 @@ namespace Kokos.Compiler.Semantics;
 public sealed class KokosFunctionType : KokosType
 {
     public IReadOnlyList<KokosType> ParameterTypes { get; }
+    public IReadOnlyList<KokosOwnershipKind> ParameterOwnership { get; }
     public KokosType ReturnType { get; }
     public KokosOwnershipKind ReturnOwnership { get; }
     public KokosFunctionNode Declaration { get; }
 
-    public KokosFunctionType(IReadOnlyList<KokosType> parameterTypes, KokosType returnType, KokosOwnershipKind returnOwnership, KokosFunctionNode declaration)
+    public KokosFunctionType(
+        IReadOnlyList<KokosType> parameterTypes,
+        IReadOnlyList<KokosOwnershipKind> parameterOwnership,
+        KokosType returnType,
+        KokosOwnershipKind returnOwnership,
+        KokosFunctionNode declaration)
     {
         ParameterTypes = parameterTypes;
+        ParameterOwnership = parameterOwnership;
         ReturnType = returnType;
         ReturnOwnership = returnOwnership;
         Declaration = declaration;

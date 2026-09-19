@@ -8,10 +8,11 @@ namespace Kokos.CodeGen;
 /// the *only* place this decision lives, so retargeting word size or adding a new primitive kind
 /// stays a one-file change.
 ///
-/// Enums/arrays/optionals/unions still have no chosen representation (Phase G+), so mapping them is
-/// left unimplemented here rather than guessed at now. Structs (and tuples, which the semantic layer
+/// Enums/arrays/optionals/unions still have no chosen representation, so mapping them is left
+/// unimplemented here rather than guessed at now. Structs (and tuples, which the semantic layer
 /// already models as a <see cref="KokosStructType"/> with a null <see cref="KokosStructType.Name"/>)
-/// are real as of Phase F — see <see cref="MapStructBody"/>.
+/// are real as of Phase F. As of Phase G, a reference struct's representation also depends on
+/// *ownership*, not just its structural type — see <see cref="Map(KokosType, KokosOwnershipKind)"/>.
 /// </summary>
 public sealed class KokosLlvmTypeMapper
 {
@@ -23,18 +24,31 @@ public sealed class KokosLlvmTypeMapper
         _context = context;
     }
 
-    public LLVMTypeRef Map(KokosType type) => type switch
+    /// <summary>
+    /// <paramref name="ownership"/> only matters for a reference struct: `owned` is a bare pointer to
+    /// its envelope (the generation lives *in* the allocation — an owned handle doesn't carry a copy
+    /// of it, per spec — and dereferencing it is unchecked, since the compiler statically guarantees
+    /// its validity); `unowned`/`manual` are represented *identically* as a "reference pair"
+    /// `{ envelopePointer, i64 capturedGeneration }` — the distinction between the two is purely
+    /// compile-time (who's allowed to call `free()`), never a runtime shape difference. Every other
+    /// case ignores ownership entirely (defaulted to `Owned` so call sites that never dealt with
+    /// ownership at all — arithmetic operand types, value-struct fields, ...— keep compiling
+    /// unchanged). By the time codegen runs, every pointer-shaped position has a concrete
+    /// `Owned`/`Unowned`/`Manual` ownership (Phase D/E's real positional defaults guarantee this), so
+    /// this never has to guess what `Inferred` would mean for a reference struct.
+    /// </summary>
+    public LLVMTypeRef Map(KokosType type, KokosOwnershipKind ownership = KokosOwnershipKind.Owned) => type switch
     {
         KokosPrimitiveType primitive => MapPrimitive(primitive),
         KokosBoolType => _context.Int1Type,
-        KokosAliasType alias => Map(alias.UnderlyingType),
+        KokosAliasType alias => Map(alias.UnderlyingType, ownership),
 
-        // A reference struct is always accessed through a pointer (IsPointerShaped is true for
-        // these); a value struct's aggregate body *is* the value (IsPointerShaped is false) — it's
-        // always copied when passed around, matching the type system's own distinction.
-        KokosStructType structType => structType.IsValueType
-            ? MapStructBody(structType)
-            : LLVMTypeRef.CreatePointer(MapStructBody(structType), 0),
+        KokosStructType { IsValueType: true } valueStructType => MapStructBody(valueStructType),
+
+        KokosStructType referenceStructType when ownership is KokosOwnershipKind.Unowned or KokosOwnershipKind.Manual =>
+            _context.GetStructType([LLVMTypeRef.CreatePointer(MapEnvelope(referenceStructType), 0), _context.Int64Type], Packed: false),
+
+        KokosStructType referenceStructType => LLVMTypeRef.CreatePointer(MapEnvelope(referenceStructType), 0),
 
         _ => throw new NotSupportedException(
             $"{type.GetType().Name} ('{type.DisplayName}') has no LLVM representation yet — " +
@@ -43,13 +57,13 @@ public sealed class KokosLlvmTypeMapper
 
     /// <summary>
     /// The raw LLVM struct layout (fields in <see cref="KokosStructField.OrdinalPosition"/> order,
-    /// which already matches declaration order) — the pointee type for a reference struct's pointer,
-    /// or the value type itself for a value struct. Memoized per <see cref="KokosStructType"/>
-    /// instance (already reference-equality-stable per the semantic layer's own memoization), using
-    /// the exact same "register a named shell before recursing into fields" sequencing
-    /// <see cref="Semantics.KokosTypeResolver.ResolveStruct"/> already uses — a self-referential
-    /// reference struct's field can otherwise never finish resolving, since a pointer to an
-    /// as-yet-opaque named struct is still a complete, valid LLVM type.
+    /// which already matches declaration order) — the value type itself for a value struct, or the
+    /// payload half of a reference struct's <see cref="MapEnvelope"/>. Memoized per
+    /// <see cref="KokosStructType"/> instance (already reference-equality-stable per the semantic
+    /// layer's own memoization), using the exact same "register a named shell before recursing into
+    /// fields" sequencing <see cref="Semantics.KokosTypeResolver.ResolveStruct"/> already uses — a
+    /// self-referential reference struct's field can otherwise never finish resolving, since a pointer
+    /// to an as-yet-opaque named struct is still a complete, valid LLVM type.
     /// </summary>
     public LLVMTypeRef MapStructBody(KokosStructType structType)
     {
@@ -59,11 +73,21 @@ public sealed class KokosLlvmTypeMapper
         var shell = _context.CreateNamedStruct(structType.Name ?? "tuple");
         _structBodyTypes[structType] = shell;
 
-        var fieldTypes = structType.Fields.Select(f => Map(f.Type)).ToArray();
+        var fieldTypes = structType.Fields.Select(f => Map(f.Type, f.Ownership)).ToArray();
         shell.StructSetBody(fieldTypes, Packed: false);
 
         return shell;
     }
+
+    /// <summary>
+    /// A reference struct's actual heap allocation shape: `{ i64 generation, body }`. Every heap
+    /// allocation (Phase G) carries a generation counter alongside its data, uniformly, per spec.
+    /// This is an anonymous (unnamed) LLVM struct type, which LLVM already structurally interns per
+    /// context — no memoization needed here the way the *named* body type requires it for recursive
+    /// self-reference support.
+    /// </summary>
+    public LLVMTypeRef MapEnvelope(KokosStructType structType) =>
+        _context.GetStructType([_context.Int64Type, MapStructBody(structType)], Packed: false);
 
     private LLVMTypeRef MapPrimitive(KokosPrimitiveType primitive) => primitive.Kind switch
     {

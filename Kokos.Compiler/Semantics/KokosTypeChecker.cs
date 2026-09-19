@@ -30,6 +30,8 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
 
     private readonly Dictionary<KokosFunctionNode, KokosFunctionType> _functionTypes = new();
     private readonly Dictionary<KokosExpressionNode, KokosType> _expressionTypes = new();
+    private readonly Dictionary<KokosVarDeclNode, KokosOwnershipKind> _localOwnership = new();
+    private readonly Dictionary<KokosNode, IReadOnlyList<string>> _releasePoints = new();
     private readonly HashSet<KokosFunctionNode> _inProgress = new();
 
     /// <summary>Every function's resolved signature, keyed by declaration — consumed by codegen.</summary>
@@ -37,6 +39,18 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
 
     /// <summary>Every expression's resolved type, keyed by node — consumed by codegen so it never re-derives what this checker already decided.</summary>
     public IReadOnlyDictionary<KokosExpressionNode, KokosType> ExpressionTypes => _expressionTypes;
+
+    /// <summary>Every `let` local's resolved ownership, keyed by declaration — consumed by codegen to pick the right LLVM representation (bare pointer vs. reference pair).</summary>
+    public IReadOnlyDictionary<KokosVarDeclNode, KokosOwnershipKind> LocalOwnership => _localOwnership;
+
+    /// <summary>
+    /// The compiler-inserted-release half of the move checker: at a <see cref="KokosReturnNode"/>, or
+    /// at a <see cref="KokosFunctionNode"/> for the implicit fall-off-the-end path, the names of every
+    /// still-whole, unconsumed `owned` binding that codegen must release right before this point.
+    /// <see cref="CheckNoOutstandingPartialMoves"/> already guarantees nothing named here can have a
+    /// moved-out field, so codegen never has to reason about partial moves.
+    /// </summary>
+    public IReadOnlyDictionary<KokosNode, IReadOnlyList<string>> ReleasePoints => _releasePoints;
 
     /// <summary>A name's resolved type plus the ownership modifier it was explicitly declared with (if any).</summary>
     private sealed class KokosBinding
@@ -172,7 +186,9 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         {
             _diagnostics.ReportError(node.NameToken.Span,
                 $"Cannot infer the return type of '{node.Name}' because it depends on itself; add an explicit return type annotation.");
-            var errorResult = new KokosFunctionType(ResolveParameterTypesOnly(node), KokosErrorType.Instance, KokosOwnershipKind.Inferred, node);
+            var errorParameterTypes = ResolveParameterTypesOnly(node);
+            var errorParameterOwnership = errorParameterTypes.Select(_ => KokosOwnershipKind.Inferred).ToList();
+            var errorResult = new KokosFunctionType(errorParameterTypes, errorParameterOwnership, KokosErrorType.Instance, KokosOwnershipKind.Inferred, node);
             _functionTypes[node] = errorResult;
             return errorResult;
         }
@@ -201,11 +217,13 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         _consumed = [];
 
         var parameterTypes = new List<KokosType>();
+        var parameterOwnership = new List<KokosOwnershipKind>();
         foreach (var parameter in node.Parameters.Items)
         {
             var paramType = _resolver.Resolve(parameter.Type);
             parameterTypes.Add(paramType);
             var ownership = KokosModifierMapper.OwnershipOf(parameter.Type, paramType, KokosOwnershipKind.Unowned);
+            parameterOwnership.Add(ownership);
             _scope[parameter.Name] = new KokosBinding(paramType, ownership);
         }
 
@@ -228,8 +246,9 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             }
 
             CheckNoOutstandingPartialMoves(node);
+            RecordReleasePoint(node);
 
-            return new KokosFunctionType(parameterTypes, effectiveReturnType, effectiveReturnOwnership, node);
+            return new KokosFunctionType(parameterTypes, parameterOwnership, effectiveReturnType, effectiveReturnOwnership, node);
         }
         finally
         {
@@ -261,6 +280,24 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
                     $"'{name}' still has a moved-out field that was never restored before the end of the function.");
             }
         }
+    }
+
+    /// <summary>
+    /// Snapshots every still-whole, unconsumed `owned` binding currently in scope against
+    /// <paramref name="node"/> — see <see cref="ReleasePoints"/>. Called once per return statement
+    /// (after that return's own <see cref="MarkTransferred"/> call, so a returned identifier is
+    /// already excluded via <see cref="_consumed"/>) and once at the end of every function body (for
+    /// the implicit fall-off-the-end path).
+    /// </summary>
+    private void RecordReleasePoint(KokosNode node)
+    {
+        var toRelease = _scope
+            .Where(entry => entry.Value.Ownership == KokosOwnershipKind.Owned && !_consumed.Contains(entry.Key))
+            .Select(entry => entry.Key)
+            .ToList();
+
+        if (toRelease.Count > 0)
+            _releasePoints[node] = toRelease;
     }
 
     private KokosType InferReturnType(KokosFunctionNode node, List<KokosType> returnTypes)
@@ -355,6 +392,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
                 : (variableType.IsPointerShaped ? KokosOwnershipKind.Owned : KokosOwnershipKind.Inferred);
 
         _scope[node.Name] = new KokosBinding(variableType, ownership);
+        _localOwnership[node] = ownership;
 
         if (ownership == KokosOwnershipKind.Owned)
             MarkTransferred(node.Initializer);
@@ -395,6 +433,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             }
         }
 
+        RecordReleasePoint(node);
         return expressionType;
     }
 
@@ -740,9 +779,13 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             }
         }
 
-        if (expression is KokosCallNode { Callee: KokosIdentifierNode calleeName } && _table.TryGetStruct(calleeName.Name, out _))
+        if (expression is KokosCallNode { Callee: KokosIdentifierNode calleeName } && _table.TryGetStruct(calleeName.Name, out var calleeStructDecl)
+            && !((KokosStructType)_resolver.ResolveStruct(calleeStructDecl)).IsValueType)
         {
-            // A construction call always produces a fresh, uniquely-owned value.
+            // A construction call always produces a fresh, uniquely-owned value — but only for a
+            // reference struct; a value struct has no ownership concept at all (it's always copied),
+            // so this deliberately doesn't match one, leaving the caller's own "value-shaped ->
+            // Inferred" fallback (e.g. in VisitVarDecl) to apply instead.
             ownership = KokosOwnershipKind.Owned;
             return true;
         }

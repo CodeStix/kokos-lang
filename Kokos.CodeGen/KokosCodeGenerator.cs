@@ -31,8 +31,10 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     private readonly LLVMModuleRef _module;
     private readonly LLVMBuilderRef _builder;
 
-    private Dictionary<string, (LLVMValueRef Pointer, LLVMTypeRef Type)> _scope = new();
+    private Dictionary<string, (LLVMValueRef Pointer, LLVMTypeRef Type, KokosOwnershipKind Ownership, KokosType KokosType)> _scope = new();
     private LLVMValueRef _currentFunction;
+    private KokosFunctionType _currentFunctionType = null!;
+    private readonly LLVMValueRef _abortFunction;
 
     /// <summary>
     /// Tracks whether the block currently being generated into already ends in a terminator (a
@@ -53,6 +55,11 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     /// truth for everything this generator created.
     /// </summary>
     public LLVMContextRef Context { get; }
+    private readonly LLVMValueRef _mallocFunction;
+    private readonly LLVMTypeRef _mallocFunctionType;
+    private readonly LLVMValueRef _freeFunction;
+    private readonly LLVMTypeRef _freeFunctionType;
+    private readonly LLVMTypeRef _abortFunctionType;
 
     public KokosCodeGenerator(KokosDeclarationTable table, KokosTypeChecker checker, string moduleName)
     {
@@ -62,6 +69,23 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         _typeMapper = new KokosLlvmTypeMapper(Context);
         _module = Context.CreateModuleWithName(moduleName);
         _builder = LLVMBuilderRef.Create(Context);
+
+        // Declared once per module, called directly rather than through the BuildMalloc/BuildFree
+        // convenience wrappers — those are legacy LLVM IRBuilder helpers that hard-code an i32
+        // allocation size, which doesn't match the real platform malloc's 64-bit size_t on win-x64
+        // and would corrupt the actual call at JIT-execution time. Every generation mismatch (a stale
+        // dereference or a double-free) traps by calling abort() the same way, resolved at JIT time
+        // through the same process-symbol generator KokosJit wires up for malloc/free. The function
+        // types are kept as fields (not reconstructed at each call site) and reused verbatim by every
+        // BuildCall2 call, so there's never a question of whether a freshly-built LLVMTypeRef is
+        // "the same" type as the one the function was actually declared with.
+        var bytePointerType = LLVMTypeRef.CreatePointer(Context.Int8Type, 0);
+        _mallocFunctionType = LLVMTypeRef.CreateFunction(bytePointerType, [Context.Int64Type]);
+        _mallocFunction = _module.AddFunction("malloc", _mallocFunctionType);
+        _freeFunctionType = LLVMTypeRef.CreateFunction(Context.VoidType, [bytePointerType]);
+        _freeFunction = _module.AddFunction("free", _freeFunctionType);
+        _abortFunctionType = LLVMTypeRef.CreateFunction(Context.VoidType, []);
+        _abortFunction = _module.AddFunction("abort", _abortFunctionType);
     }
 
     /// <summary>Generates every function in the file and returns the completed module.</summary>
@@ -77,8 +101,15 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         // value at all" (a function with neither a declared return type nor any return-with-a-value
         // anywhere in its body, per KokosTypeChecker.CheckFunctionCore) — the one place this sentinel
         // is a legitimate type to map, rather than a bug elsewhere.
-        var returnType = functionType.ReturnType is KokosUnknownType ? Context.VoidType : _typeMapper.Map(functionType.ReturnType);
-        return LLVMTypeRef.CreateFunction(returnType, functionType.ParameterTypes.Select(_typeMapper.Map).ToArray());
+        var returnType = functionType.ReturnType is KokosUnknownType
+            ? Context.VoidType
+            : _typeMapper.Map(functionType.ReturnType, functionType.ReturnOwnership);
+
+        var parameterTypes = functionType.ParameterTypes
+            .Zip(functionType.ParameterOwnership, (type, ownership) => _typeMapper.Map(type, ownership))
+            .ToArray();
+
+        return LLVMTypeRef.CreateFunction(returnType, parameterTypes);
     }
 
     // --- Terminator-tracking wrappers (see _blockTerminated) --------------------------------------
@@ -146,8 +177,10 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
 
         var outerScope = _scope;
         var outerFunction = _currentFunction;
+        var outerFunctionType = _currentFunctionType;
         _scope = [];
         _currentFunction = function;
+        _currentFunctionType = functionType;
 
         try
         {
@@ -157,10 +190,12 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
             for (var i = 0; i < node.Parameters.Items.Count; i++)
             {
                 var parameter = node.Parameters.Items[i];
-                var llvmParamType = _typeMapper.Map(functionType.ParameterTypes[i]);
+                var ownership = functionType.ParameterOwnership[i];
+                var kokosType = functionType.ParameterTypes[i];
+                var llvmParamType = _typeMapper.Map(kokosType, ownership);
                 var alloca = _builder.BuildAlloca(llvmParamType, parameter.Name);
                 _builder.BuildStore(function.GetParam((uint)i), alloca);
-                _scope[parameter.Name] = (alloca, llvmParamType);
+                _scope[parameter.Name] = (alloca, llvmParamType, ownership, kokosType);
             }
 
             node.Body.Accept(this);
@@ -168,9 +203,13 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
             // A function with no declared return type and no return-with-a-value anywhere in its
             // body (checked as legitimately void-like by KokosTypeChecker) is allowed to simply fall
             // off the end without an explicit `return;` — every LLVM basic block still needs an
-            // explicit terminator, so supply the implicit one here.
+            // explicit terminator, so supply the implicit one here. The checker records this same
+            // fall-through path's release list against the function node itself (see ReleasePoints).
             if (!_blockTerminated)
+            {
+                EmitReleasesFor(node);
                 BuildRetVoid();
+            }
 
             function.VerifyFunction(LLVMVerifierFailureAction.LLVMPrintMessageAction);
         }
@@ -178,6 +217,7 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         {
             _scope = outerScope;
             _currentFunction = outerFunction;
+            _currentFunctionType = outerFunctionType;
         }
     }
 
@@ -203,21 +243,33 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     public LLVMValueRef VisitVarDecl(KokosVarDeclNode node)
     {
         var value = node.Initializer.Accept(this);
-        var type = _typeMapper.Map(_checker.ExpressionTypes[node.Initializer]);
+        var kokosType = _checker.ExpressionTypes[node.Initializer];
+        var ownership = _checker.LocalOwnership[node];
 
-        var alloca = _builder.BuildAlloca(type, node.Name);
-        _builder.BuildStore(value, alloca);
-        _scope[node.Name] = (alloca, type);
-        return value;
+        var converted = ConvertOwnership(value, GetOwnership(node.Initializer), ownership, kokosType);
+        var llvmType = _typeMapper.Map(kokosType, ownership);
+
+        var alloca = _builder.BuildAlloca(llvmType, node.Name);
+        _builder.BuildStore(converted, alloca);
+        _scope[node.Name] = (alloca, llvmType, ownership, kokosType);
+        return converted;
     }
 
     public LLVMValueRef VisitReturn(KokosReturnNode node)
     {
         if (node.Expression is null)
+        {
+            EmitReleasesFor(node);
             return BuildRetVoid();
+        }
 
+        // Evaluate the return value first — it may itself read from a binding this same return is
+        // about to release (e.g. `return other.field;` while `other` gets released here too) — then
+        // release whatever's left over, then actually return.
         var value = node.Expression.Accept(this);
-        return BuildRet(value);
+        var converted = ConvertOwnership(value, GetOwnership(node.Expression), _currentFunctionType.ReturnOwnership, _currentFunctionType.ReturnType);
+        EmitReleasesFor(node);
+        return BuildRet(converted);
     }
 
     public LLVMValueRef VisitExpressionStatement(KokosExpressionStatementNode node) => node.Expression.Accept(this);
@@ -276,7 +328,7 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
 
     public LLVMValueRef VisitIdentifier(KokosIdentifierNode node)
     {
-        var (pointer, type) = _scope[node.Name];
+        var (pointer, type, _, _) = _scope[node.Name];
         return _builder.BuildLoad2(type, pointer, node.Name);
     }
 
@@ -394,12 +446,14 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     public LLVMValueRef VisitAssignment(KokosAssignmentNode node)
     {
         var value = node.Value.Accept(this);
+        var sourceOwnership = GetOwnership(node.Value);
 
         if (node.Target is KokosIdentifierNode identifier)
         {
-            var (pointer, _) = _scope[identifier.Name];
-            _builder.BuildStore(value, pointer);
-            return value;
+            var (pointer, _, targetOwnership, kokosType) = _scope[identifier.Name];
+            var converted = ConvertOwnership(value, sourceOwnership, targetOwnership, kokosType);
+            _builder.BuildStore(converted, pointer);
+            return converted;
         }
 
         if (node.Target is KokosMemberAccessNode access)
@@ -417,22 +471,30 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
 
                 // An LLVM aggregate can't be partially stored into — read-modify-write the whole
                 // thing back into the base's alloca.
-                var (basePointer, baseLlvmType) = _scope[baseIdentifier.Name];
+                var (basePointer, baseLlvmType, _, _) = _scope[baseIdentifier.Name];
                 var current = _builder.BuildLoad2(baseLlvmType, basePointer, "struct.load");
                 var field = FindField(valueStructType, access);
-                var updated = _builder.BuildInsertValue(current, value, (uint)field.OrdinalPosition, "struct.update");
+                var converted = ConvertOwnership(value, sourceOwnership, field.Ownership, field.Type);
+                var updated = _builder.BuildInsertValue(current, converted, (uint)field.OrdinalPosition, "struct.update");
                 _builder.BuildStore(updated, basePointer);
-                return value;
+                return converted;
             }
 
             if (targetType is KokosStructType referenceStructType)
             {
-                var basePointer = access.Target.Accept(this);
-                var bodyType = _typeMapper.MapStructBody(referenceStructType);
+                var envelopeType = _typeMapper.MapEnvelope(referenceStructType);
+                var baseOwnership = GetOwnership(access.Target);
+                var baseValue = access.Target.Accept(this);
+                var envelopePointer = baseOwnership == KokosOwnershipKind.Owned
+                    ? baseValue
+                    : CheckGenerationOrTrap(baseValue, envelopeType, "deref");
+
+                var bodyPointer = GetBody(envelopePointer, envelopeType);
                 var field = FindField(referenceStructType, access);
-                var fieldPointer = _builder.BuildStructGEP2(bodyType, basePointer, (uint)field.OrdinalPosition, "fieldptr");
-                _builder.BuildStore(value, fieldPointer);
-                return value;
+                var converted = ConvertOwnership(value, sourceOwnership, field.Ownership, field.Type);
+                var fieldPointer = _builder.BuildStructGEP2(_typeMapper.MapStructBody(referenceStructType), bodyPointer, (uint)field.OrdinalPosition, "fieldptr");
+                _builder.BuildStore(converted, fieldPointer);
+                return converted;
             }
         }
 
@@ -444,6 +506,142 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         (access.NameToken.Kind == TokenKind.NumberLiteral
             ? (int.TryParse(access.MemberName, out var ordinal) ? structType.FindField(ordinal) : null)
             : structType.FindField(access.MemberName))!;
+
+    // --- Ownership / generational references (Phase G) ---------------------------------------------
+
+    /// <summary>
+    /// Re-derives an expression's ownership from codegen's own already-public data, mirroring the
+    /// small set of shapes <c>KokosTypeChecker.TryGetOwnership</c> established: a bound identifier, a
+    /// direct struct-field access, a construction call (always fresh and uniquely owned), or an
+    /// ordinary function call (the callee's own resolved return ownership). Anything else defaults to
+    /// `Owned` — matching the checker's own "unresolvable defaults toward Owned" convention — since
+    /// nothing else can validly reach a position where the distinction matters (a ternary's ownership
+    /// isn't tracked at either layer, for instance).
+    /// </summary>
+    private KokosOwnershipKind GetOwnership(KokosExpressionNode expression) => expression switch
+    {
+        KokosIdentifierNode identifier => _scope[identifier.Name].Ownership,
+        KokosMemberAccessNode access when _checker.ExpressionTypes[access.Target] is KokosStructType structType =>
+            FindField(structType, access).Ownership,
+        // A construction call always produces a fresh, uniquely-owned value — but only for a
+        // reference struct; a value struct has no ownership concept at all (it's always copied), so
+        // this deliberately doesn't match one and falls through to the plain-Owned default below,
+        // which is harmless there since ConvertOwnership only ever acts on a pointer-shaped target.
+        KokosCallNode { Callee: KokosIdentifierNode name } call when _table.TryGetStruct(name.Name, out _)
+            && _checker.ExpressionTypes[call] is KokosStructType { IsValueType: false } => KokosOwnershipKind.Owned,
+        KokosCallNode { Callee: KokosIdentifierNode name } when _table.TryGetFunction(name.Name, out var decl) => _checker.FunctionTypes[decl].ReturnOwnership,
+        _ => KokosOwnershipKind.Owned,
+    };
+
+    /// <summary>
+    /// Converts a value from its source ownership's LLVM shape to a target position's expected shape.
+    /// The only real case is `owned` (bare envelope pointer) -> `unowned`/`manual` (reference pair): a
+    /// reborrow reads the *allocation's current* generation and packages it with the pointer.
+    /// `unowned`/`manual` -> `unowned`/`manual` and `owned` -> `owned` both pass the value through
+    /// completely unchanged — re-capturing a "fresh" generation on an already-non-owned pass would
+    /// silently defeat exactly the staleness detection a longer-lived reference exists to catch.
+    /// <paramref name="type"/> only needs to be a real <see cref="KokosStructType"/> when a reborrow
+    /// actually happens (guaranteed by <paramref name="to"/> being `Unowned`/`Manual`, which per the
+    /// placement-validation rules from Phase D can only ever apply to a pointer-shaped type).
+    /// </summary>
+    private LLVMValueRef ConvertOwnership(LLVMValueRef value, KokosOwnershipKind from, KokosOwnershipKind to, KokosType type)
+    {
+        if (from != KokosOwnershipKind.Owned || to is not (KokosOwnershipKind.Unowned or KokosOwnershipKind.Manual))
+            return value;
+
+        var structType = (KokosStructType)type;
+        var envelopeType = _typeMapper.MapEnvelope(structType);
+        var generation = LoadCurrentGeneration(value, envelopeType);
+        var pairType = _typeMapper.Map(structType, to);
+        var pair = _builder.BuildInsertValue(pairType.Undef, value, 0, "reborrow");
+        return _builder.BuildInsertValue(pair, generation, 1, "reborrow");
+    }
+
+    /// <summary>The payload half of an envelope (index 1 — index 0 is the generation), given a bare envelope pointer.</summary>
+    private LLVMValueRef GetBody(LLVMValueRef envelopePointer, LLVMTypeRef envelopeType) =>
+        _builder.BuildStructGEP2(envelopeType, envelopePointer, 1, "body");
+
+    /// <summary>Reads the *current* generation stored in an allocation, given a bare envelope pointer.</summary>
+    private LLVMValueRef LoadCurrentGeneration(LLVMValueRef envelopePointer, LLVMTypeRef envelopeType)
+    {
+        var generationPointer = _builder.BuildStructGEP2(envelopeType, envelopePointer, 0, "genptr");
+        return _builder.BuildLoad2(Context.Int64Type, generationPointer, "gen");
+    }
+
+    private LLVMValueRef ExtractPointer(LLVMValueRef referencePair) => _builder.BuildExtractValue(referencePair, 0, "ptr");
+
+    private LLVMValueRef ExtractCapturedGeneration(LLVMValueRef referencePair) => _builder.BuildExtractValue(referencePair, 1, "capturedgen");
+
+    /// <summary>
+    /// The "every dereference is runtime-checked" guarantee: given an `unowned`/`manual` reference
+    /// pair, compares its captured generation against the allocation's current one and traps on a
+    /// mismatch. Returns the bare envelope pointer for the caller to keep using once the check passes.
+    /// </summary>
+    private LLVMValueRef CheckGenerationOrTrap(LLVMValueRef referencePair, LLVMTypeRef envelopeType, string label)
+    {
+        var pointer = ExtractPointer(referencePair);
+        var capturedGeneration = ExtractCapturedGeneration(referencePair);
+        var currentGeneration = LoadCurrentGeneration(pointer, envelopeType);
+        var matches = _builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, currentGeneration, capturedGeneration, "genmatch");
+
+        var trapBlock = _currentFunction.AppendBasicBlock($"{label}.trap");
+        var continueBlock = _currentFunction.AppendBasicBlock($"{label}.ok");
+        BuildCondBr(matches, continueBlock, trapBlock);
+
+        PositionAtEnd(trapBlock);
+        EmitTrap();
+
+        PositionAtEnd(continueBlock);
+        return pointer;
+    }
+
+    /// <summary>Calls <c>abort()</c> (resolved at JIT time the same way <c>malloc</c>/<c>free</c> already are) and closes the block — `abort` never returns, but LLVM still requires an explicit terminator. A call to a void-returning function must be given an empty name — LLVM rejects naming a void value.</summary>
+    private void EmitTrap()
+    {
+        _builder.BuildCall2(_abortFunctionType, _abortFunction, Array.Empty<LLVMValueRef>(), "");
+        _builder.BuildUnreachable();
+        _blockTerminated = true;
+    }
+
+    /// <summary>
+    /// Heap-allocates <paramref name="type"/>'s worth of memory and returns it typed as a pointer to
+    /// it, via a manually-declared <c>malloc</c> (see the constructor for why — the <c>BuildMalloc</c>
+    /// convenience wrapper hard-codes a 32-bit size that doesn't match the real platform ABI).
+    /// </summary>
+    private LLVMValueRef EmitMalloc(LLVMTypeRef type, string name) =>
+        _builder.BuildCall2(_mallocFunctionType, _mallocFunction, new LLVMValueRef[] { type.SizeOf }, name);
+
+    /// <summary>Bumps an allocation's generation (invalidating every outstanding `unowned`/`manual` reference to it) and releases its memory via the manually-declared `free`. Shared by explicit `free()` (after a double-free check) and compiler-inserted release of an unconsumed `owned` binding at scope-end (no check needed there — the move checker already proved it can't be released twice).</summary>
+    private void EmitRelease(LLVMValueRef envelopePointer, LLVMTypeRef envelopeType)
+    {
+        var generationPointer = _builder.BuildStructGEP2(envelopeType, envelopePointer, 0, "genptr");
+        var currentGeneration = _builder.BuildLoad2(Context.Int64Type, generationPointer, "gen");
+        var bumped = _builder.BuildAdd(currentGeneration, LLVMValueRef.CreateConstInt(Context.Int64Type, 1, false), "gen.bump");
+        _builder.BuildStore(bumped, generationPointer);
+        _builder.BuildCall2(_freeFunctionType, _freeFunction, new LLVMValueRef[] { envelopePointer }, "");
+    }
+
+    /// <summary>
+    /// The codegen half of compiler-inserted release: looks up whatever <c>KokosTypeChecker</c>
+    /// recorded against this exact node (a return statement, or the enclosing function for the
+    /// implicit fall-off-the-end path — see <see cref="KokosTypeChecker.ReleasePoints"/>) and emits a
+    /// release for each. Every name recorded there is guaranteed to be a plain, bare-pointer `owned`
+    /// binding, still whole (no moved-out field) — the checker's own diagnostics already rule out
+    /// anything else reaching this point.
+    /// </summary>
+    private void EmitReleasesFor(KokosNode node)
+    {
+        if (!_checker.ReleasePoints.TryGetValue(node, out var names))
+            return;
+
+        foreach (var name in names)
+        {
+            var binding = _scope[name];
+            var envelopePointer = _builder.BuildLoad2(binding.Type, binding.Pointer, "release.load");
+            var envelopeType = _typeMapper.MapEnvelope((KokosStructType)binding.KokosType);
+            EmitRelease(envelopePointer, envelopeType);
+        }
+    }
 
     public LLVMValueRef VisitCall(KokosCallNode node)
     {
@@ -460,52 +658,73 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
                 "chosen representation (Phase G+).");
         }
 
+        var calleeFunctionType = _checker.FunctionTypes[calleeDecl];
         var callee = _module.GetNamedFunction(calleeIdentifier.Name);
-        var calleeLlvmType = MapFunctionSignature(_checker.FunctionTypes[calleeDecl]);
-        var args = node.Arguments.Items.Select(a => a.Expression.Accept(this)).ToArray();
+        var calleeLlvmType = MapFunctionSignature(calleeFunctionType);
 
-        return _builder.BuildCall2(calleeLlvmType, callee, args, "calltmp");
+        var args = new LLVMValueRef[node.Arguments.Items.Count];
+        for (var i = 0; i < args.Length; i++)
+        {
+            var argumentExpression = node.Arguments.Items[i].Expression;
+            var value = argumentExpression.Accept(this);
+            args[i] = ConvertOwnership(value, GetOwnership(argumentExpression), calleeFunctionType.ParameterOwnership[i], calleeFunctionType.ParameterTypes[i]);
+        }
+
+        // A void-returning call must be given an empty name — LLVM rejects naming a void value.
+        var callName = calleeFunctionType.ReturnType is KokosUnknownType ? "" : "calltmp";
+        return _builder.BuildCall2(calleeLlvmType, callee, args, callName);
     }
 
     /// <summary>
-    /// A reference struct is heap-allocated via <c>BuildMalloc</c> (declares and calls the target's
-    /// <c>malloc</c> under the hood, sized and typed to the struct's body) and each argument is stored
-    /// into its field slot via <c>BuildStructGEP2</c>. A value struct needs no allocation at all — it's
-    /// built directly as an SSA aggregate, starting from an undef value and inserting each argument in
-    /// turn. Argument-to-field matching (by name, or positionally against
+    /// A reference struct is heap-allocated as its full <c>{ generation, body }</c> envelope via a
+    /// manually-declared <c>malloc</c> (see <see cref="EmitMalloc"/>), the
+    /// generation initialized to <c>0</c>, and each argument stored into its field slot (inside the
+    /// body half) via <c>BuildStructGEP2</c>. A value struct needs no allocation at all — it's built
+    /// directly as an SSA aggregate, starting from an undef value and inserting each argument in turn.
+    /// Argument-to-field matching (by name, or positionally against
     /// <see cref="KokosStructField.OrdinalPosition"/>) mirrors <c>KokosTypeChecker.CheckConstructionCall</c>
-    /// exactly, which has already fully validated this call — codegen only needs to *emit* it.
+    /// exactly, which has already fully validated this call — codegen only needs to *emit* it. Each
+    /// argument is converted to its field's declared ownership shape (see <see cref="ConvertOwnership"/>)
+    /// — this is what makes constructing e.g. a struct with an `unowned` field out of an `owned`
+    /// local work.
     /// </summary>
     private LLVMValueRef GenerateConstructionCall(KokosCallNode node, KokosStructType structType)
     {
-        var bodyType = _typeMapper.MapStructBody(structType);
         var arguments = node.Arguments.Items;
 
         if (structType.IsValueType)
         {
+            var bodyType = _typeMapper.MapStructBody(structType);
             var aggregate = bodyType.Undef;
             for (var i = 0; i < arguments.Count; i++)
             {
                 var argument = arguments[i];
-                var field = argument.Name is not null ? structType.FindField(argument.Name) : structType.FindField(i);
+                var field = (argument.Name is not null ? structType.FindField(argument.Name) : structType.FindField(i))!;
                 var value = argument.Expression.Accept(this);
-                aggregate = _builder.BuildInsertValue(aggregate, value, (uint)field!.OrdinalPosition, "ctor");
+                var converted = ConvertOwnership(value, GetOwnership(argument.Expression), field.Ownership, field.Type);
+                aggregate = _builder.BuildInsertValue(aggregate, converted, (uint)field.OrdinalPosition, "ctor");
             }
 
             return aggregate;
         }
 
-        var instance = _builder.BuildMalloc(bodyType, structType.Name ?? "tuple");
+        var envelopeType = _typeMapper.MapEnvelope(structType);
+        var envelope = EmitMalloc(envelopeType, structType.Name ?? "tuple");
+        var generationPointer = _builder.BuildStructGEP2(envelopeType, envelope, 0, "genptr");
+        _builder.BuildStore(LLVMValueRef.CreateConstInt(Context.Int64Type, 0, false), generationPointer);
+
+        var bodyPointer = GetBody(envelope, envelopeType);
         for (var i = 0; i < arguments.Count; i++)
         {
             var argument = arguments[i];
-            var field = argument.Name is not null ? structType.FindField(argument.Name) : structType.FindField(i);
+            var field = (argument.Name is not null ? structType.FindField(argument.Name) : structType.FindField(i))!;
             var value = argument.Expression.Accept(this);
-            var fieldPointer = _builder.BuildStructGEP2(bodyType, instance, (uint)field!.OrdinalPosition, "fieldptr");
-            _builder.BuildStore(value, fieldPointer);
+            var converted = ConvertOwnership(value, GetOwnership(argument.Expression), field.Ownership, field.Type);
+            var fieldPointer = _builder.BuildStructGEP2(_typeMapper.MapStructBody(structType), bodyPointer, (uint)field.OrdinalPosition, "fieldptr");
+            _builder.BuildStore(converted, fieldPointer);
         }
 
-        return instance;
+        return envelope;
     }
 
     public LLVMValueRef VisitArgument(KokosArgumentNode node) => node.Expression.Accept(this);
@@ -541,10 +760,19 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
             return _builder.BuildExtractValue(aggregate, (uint)field.OrdinalPosition, "field");
         }
 
-        var pointer = node.Target.Accept(this);
-        var bodyType = _typeMapper.MapStructBody(structType);
-        var fieldPointer = _builder.BuildStructGEP2(bodyType, pointer, (uint)field.OrdinalPosition, "fieldptr");
-        return _builder.BuildLoad2(_typeMapper.Map(field.Type), fieldPointer, "field");
+        // An `owned` reference dereferences unchecked (compiler-proven valid, per spec); an
+        // `unowned`/`manual` reference is a {pointer, capturedGeneration} pair that must pass the
+        // generation check before every dereference — a mismatch traps.
+        var envelopeType = _typeMapper.MapEnvelope(structType);
+        var targetOwnership = GetOwnership(node.Target);
+        var targetValue = node.Target.Accept(this);
+        var envelopePointer = targetOwnership == KokosOwnershipKind.Owned
+            ? targetValue
+            : CheckGenerationOrTrap(targetValue, envelopeType, "deref");
+
+        var bodyPointer = GetBody(envelopePointer, envelopeType);
+        var fieldPointer = _builder.BuildStructGEP2(_typeMapper.MapStructBody(structType), bodyPointer, (uint)field.OrdinalPosition, "fieldptr");
+        return _builder.BuildLoad2(_typeMapper.Map(field.Type, field.Ownership), fieldPointer, "field");
     }
 
     // --- Not yet supported (later phases) -------------------------------------------------------------
@@ -567,6 +795,30 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     public LLVMValueRef VisitStructDecl(KokosStructDeclNode node) => throw NotYet(nameof(KokosStructDeclNode), "declarations aren't codegen'd directly, only referenced through resolved types");
     public LLVMValueRef VisitField(KokosFieldNode node) => throw NotYet(nameof(KokosFieldNode), "has no standalone codegen; only meaningful as part of resolving its struct/tuple");
     public LLVMValueRef VisitLiteralString(KokosLiteralStringNode node) => throw NotYet(nameof(KokosLiteralStringNode), "needs a chosen string runtime representation");
-    public LLVMValueRef VisitDestroyedExpression(KokosDestroyedExpressionNode node) => throw NotYet(nameof(KokosDestroyedExpressionNode), "needs generational-reference runtime support");
-    public LLVMValueRef VisitFreeStatement(KokosFreeStatementNode node) => throw NotYet(nameof(KokosFreeStatementNode), "needs generational-reference runtime support");
+    /// <summary>`destroyed(x)` — compares the current allocation generation against x's captured one and returns the mismatch as a plain Bool. Never traps: this is the whole point of checking safely instead of dereferencing blindly.</summary>
+    public LLVMValueRef VisitDestroyedExpression(KokosDestroyedExpressionNode node)
+    {
+        var structType = (KokosStructType)_checker.ExpressionTypes[node.Operand];
+        var envelopeType = _typeMapper.MapEnvelope(structType);
+        var referencePair = node.Operand.Accept(this);
+
+        var pointer = ExtractPointer(referencePair);
+        var capturedGeneration = ExtractCapturedGeneration(referencePair);
+        var currentGeneration = LoadCurrentGeneration(pointer, envelopeType);
+
+        return _builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, currentGeneration, capturedGeneration, "destroyed");
+    }
+
+    /// <summary>`free(m)` — a double-free is exactly a stale-reference use per spec, so it's checked (and traps on mismatch) the same way an ordinary dereference is, before bumping the generation and releasing the memory.</summary>
+    public LLVMValueRef VisitFreeStatement(KokosFreeStatementNode node)
+    {
+        var structType = (KokosStructType)_checker.ExpressionTypes[node.Operand];
+        var envelopeType = _typeMapper.MapEnvelope(structType);
+        var referencePair = node.Operand.Accept(this);
+
+        var pointer = CheckGenerationOrTrap(referencePair, envelopeType, "free");
+        EmitRelease(pointer, envelopeType);
+
+        return default;
+    }
 }

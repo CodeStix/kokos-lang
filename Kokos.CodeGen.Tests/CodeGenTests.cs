@@ -1,4 +1,4 @@
-using Kokos.Compiler.Diagnostics;
+﻿using Kokos.Compiler.Diagnostics;
 using Kokos.Compiler.Parsing;
 using Kokos.Compiler.Semantics;
 using Kokos.CodeGen;
@@ -367,5 +367,113 @@ public class CodeGenTests
         var swapAndReadA = jit.GetFunction<BinaryLongFunc>("swapAndReadA");
 
         Assert.Equal(20, swapAndReadA(10, 20));
+    }
+
+    // --- Phase G: generational references, free(), destroyed(), compiler-inserted release ---------
+
+    [Fact]
+    public void Destroyed_on_a_fresh_unowned_reference_is_false()
+    {
+        using var jit = GenerateAndJit(
+            """
+            struct Person { age: Int }
+
+            function f(): Int {
+                let p = Person(age: 5);
+                let q: unowned Person = p;
+                if destroyed(q) {
+                    return 1;
+                }
+                return 0;
+            }
+            """);
+
+        var f = jit.GetFunction<NullaryLongFunc>("f");
+
+        Assert.Equal(0, f());
+    }
+
+    [Fact]
+    public void Free_then_destroyed_on_a_second_unowned_reference_to_the_same_allocation_is_true()
+    {
+        // The concrete, end-to-end proof the generation mechanism actually works: freeing a manual
+        // handle bumps the allocation's generation, which a *different*, already-captured unowned
+        // reference to the same allocation can detect without ever touching the freed memory itself.
+        using var jit = GenerateAndJit(
+            """
+            struct Person { age: Int }
+
+            function f(): Int {
+                let p: manual Person = Person(age: 5);
+                let q: unowned Person = p;
+                free(p);
+                if destroyed(q) {
+                    return 1;
+                }
+                return 0;
+            }
+            """);
+
+        var f = jit.GetFunction<NullaryLongFunc>("f");
+
+        Assert.Equal(1, f());
+    }
+
+    [Fact]
+    public void Owned_argument_reborrowed_into_an_unowned_parameter_reads_the_correct_field()
+    {
+        // readAge's parameter has no explicit modifier — it defaults to unowned (Phase D) — so
+        // passing an owned local here exercises the reborrow conversion, not a plain pass-through.
+        using var jit = GenerateAndJit(
+            """
+            struct Person { age: Int }
+
+            function readAge(p: Person): Int { return p.age; }
+
+            function f(): Int {
+                let ownedPerson = Person(age: 42);
+                return readAge(ownedPerson);
+            }
+            """);
+
+        var f = jit.GetFunction<NullaryLongFunc>("f");
+
+        Assert.Equal(42, f());
+    }
+
+    [Fact]
+    public void ChooseOldest_releases_the_person_it_does_not_return()
+    {
+        // watchB is an independent unowned reference to b, captured before the call. chooseOldest's
+        // parameters are owned, so the call consumes both a and b; whichever one it does *not*
+        // return gets compiler-inserted-released at its own scope-end. Calling with ageA > ageB makes
+        // b the one that's released, which watchB should then detect as destroyed.
+        using var jit = GenerateAndJit(
+            """
+            struct Person { age: Int }
+
+            function chooseOldest(a: owned Person, b: owned Person): owned Person {
+                if a.age > b.age {
+                    return a;
+                } else {
+                    return b;
+                }
+            }
+
+            function f(ageA: Int, ageB: Int): Int {
+                let a = Person(age: ageA);
+                let b = Person(age: ageB);
+                let watchB: unowned Person = b;
+                let winner = chooseOldest(a, b);
+                if destroyed(watchB) {
+                    return winner.age + 1000;
+                }
+                return winner.age;
+            }
+            """);
+
+        var f = jit.GetFunction<BinaryLongFunc>("f");
+
+        Assert.Equal(1030, f(30, 20));
     }
 }
