@@ -132,7 +132,7 @@ public class CodeGenTests
     [Fact]
     public void ChooseOldest_shaped_function_picks_the_correct_value_for_both_orderings()
     {
-        // Structs aren't codegen'd yet (Phase E) — this captures the same two-branch, both-return
+        // Structs aren't codegen'd yet (Phase F) — this captures the same two-branch, both-return
         // shape as the memory-model spec's chooseOldest example, using plain Int parameters instead
         // of Person structs.
         using var jit = GenerateAndJit(

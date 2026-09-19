@@ -25,6 +25,7 @@ public interface IKokosVisitor<out T>
     T VisitExpressionStatement(KokosExpressionStatementNode node);
     T VisitIfStatement(KokosIfStatementNode node);
     T VisitWhileStatement(KokosWhileStatementNode node);
+    T VisitFreeStatement(KokosFreeStatementNode node);
     T VisitIdentifier(KokosIdentifierNode node);
     T VisitLiteralNumber(KokosLiteralNumberNode node);
     T VisitLiteralString(KokosLiteralStringNode node);

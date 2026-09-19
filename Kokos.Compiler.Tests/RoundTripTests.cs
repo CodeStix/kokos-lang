@@ -148,6 +148,9 @@ public class RoundTripTests
         yield return ["function f(p: owned Person|unowned Fruit): Int { return 0; }"];
         yield return ["function f(p: length(100) [Int8]): Int { return 0; }"];
         yield return ["function f(p: owned length(100) [Int8]): Int { return 0; }"];
+
+        // Phase E: free() for manual handles.
+        yield return ["function f(m: manual Person) { free(m); }"];
     }
 
     [Theory]

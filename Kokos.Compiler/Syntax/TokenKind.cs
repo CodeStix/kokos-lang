@@ -30,6 +30,7 @@ public enum TokenKind
     UnownedKeyword,
     ManualKeyword,
     DestroyedKeyword,
+    FreeKeyword,
 
     // Punctuation
     OpenParen,

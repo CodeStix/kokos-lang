@@ -396,6 +396,22 @@ public class FormatterTests
     }
 
     [Fact]
+    public void Formats_a_free_statement()
+    {
+        var unit = KokosParser.Parse("function f(m:manual Person){free(  m  );}", out var diagnostics);
+        Assert.False(diagnostics.HasErrors);
+
+        Assert.Equal(
+            """
+            function f(m: manual Person) {
+                free(m);
+            }
+
+            """,
+            KokosFormatter.Format(unit));
+    }
+
+    [Fact]
     public void Formats_a_destroyed_expression()
     {
         var unit = KokosParser.Parse(

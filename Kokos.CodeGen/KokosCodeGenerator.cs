@@ -390,7 +390,7 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         {
             throw new NotSupportedException(
                 "Only direct calls to a function declared in this file are supported in Phase A — construction " +
-                "calls, enum-variant construction, and member calls need an allocation strategy first (Phase E).");
+                "calls, enum-variant construction, and member calls need an allocation strategy first (Phase F).");
         }
 
         var callee = _module.GetNamedFunction(calleeIdentifier.Name);
@@ -422,19 +422,20 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
 
     public LLVMValueRef VisitParameter(KokosParameterNode node) => throw NotYet(nameof(KokosParameterNode), "not visited directly by codegen — parameter types come from the checker's resolved KokosFunctionType");
     public LLVMValueRef VisitNamedType(KokosNamedTypeNode node) => throw NotYet(nameof(KokosNamedTypeNode), "type nodes aren't visited by codegen directly");
-    public LLVMValueRef VisitArrayType(KokosArrayTypeNode node) => throw NotYet(nameof(KokosArrayTypeNode), "Phase E");
-    public LLVMValueRef VisitFixedLengthArrayType(KokosFixedLengthArrayTypeNode node) => throw NotYet(nameof(KokosFixedLengthArrayTypeNode), "Phase E");
-    public LLVMValueRef VisitTerminatedArrayType(KokosTerminatedArrayTypeNode node) => throw NotYet(nameof(KokosTerminatedArrayTypeNode), "Phase E");
-    public LLVMValueRef VisitOptionalType(KokosOptionalTypeNode node) => throw NotYet(nameof(KokosOptionalTypeNode), "Phase E");
-    public LLVMValueRef VisitUnionType(KokosUnionTypeNode node) => throw NotYet(nameof(KokosUnionTypeNode), "Phase E");
-    public LLVMValueRef VisitTupleType(KokosTupleTypeNode node) => throw NotYet(nameof(KokosTupleTypeNode), "Phase E");
+    public LLVMValueRef VisitArrayType(KokosArrayTypeNode node) => throw NotYet(nameof(KokosArrayTypeNode), "Phase F");
+    public LLVMValueRef VisitFixedLengthArrayType(KokosFixedLengthArrayTypeNode node) => throw NotYet(nameof(KokosFixedLengthArrayTypeNode), "Phase F");
+    public LLVMValueRef VisitTerminatedArrayType(KokosTerminatedArrayTypeNode node) => throw NotYet(nameof(KokosTerminatedArrayTypeNode), "Phase F");
+    public LLVMValueRef VisitOptionalType(KokosOptionalTypeNode node) => throw NotYet(nameof(KokosOptionalTypeNode), "Phase F");
+    public LLVMValueRef VisitUnionType(KokosUnionTypeNode node) => throw NotYet(nameof(KokosUnionTypeNode), "Phase F");
+    public LLVMValueRef VisitTupleType(KokosTupleTypeNode node) => throw NotYet(nameof(KokosTupleTypeNode), "Phase F");
     public LLVMValueRef VisitModifiedType(KokosModifiedTypeNode node) => throw NotYet(nameof(KokosModifiedTypeNode), "type nodes aren't visited by codegen directly");
     public LLVMValueRef VisitTypeAlias(KokosTypeAliasNode node) => throw NotYet(nameof(KokosTypeAliasNode), "declarations aren't codegen'd directly, only referenced through resolved types");
-    public LLVMValueRef VisitEnumDecl(KokosEnumDeclNode node) => throw NotYet(nameof(KokosEnumDeclNode), "Phase E");
-    public LLVMValueRef VisitEnumVariant(KokosEnumVariantNode node) => throw NotYet(nameof(KokosEnumVariantNode), "Phase E");
-    public LLVMValueRef VisitStructDecl(KokosStructDeclNode node) => throw NotYet(nameof(KokosStructDeclNode), "Phase E");
-    public LLVMValueRef VisitField(KokosFieldNode node) => throw NotYet(nameof(KokosFieldNode), "Phase E");
-    public LLVMValueRef VisitLiteralString(KokosLiteralStringNode node) => throw NotYet(nameof(KokosLiteralStringNode), "needs a string runtime representation, Phase E");
-    public LLVMValueRef VisitMemberAccess(KokosMemberAccessNode node) => throw NotYet(nameof(KokosMemberAccessNode), "needs struct codegen, Phase E");
-    public LLVMValueRef VisitDestroyedExpression(KokosDestroyedExpressionNode node) => throw NotYet(nameof(KokosDestroyedExpressionNode), "Phase E — needs generational-reference runtime support");
+    public LLVMValueRef VisitEnumDecl(KokosEnumDeclNode node) => throw NotYet(nameof(KokosEnumDeclNode), "Phase F");
+    public LLVMValueRef VisitEnumVariant(KokosEnumVariantNode node) => throw NotYet(nameof(KokosEnumVariantNode), "Phase F");
+    public LLVMValueRef VisitStructDecl(KokosStructDeclNode node) => throw NotYet(nameof(KokosStructDeclNode), "Phase F");
+    public LLVMValueRef VisitField(KokosFieldNode node) => throw NotYet(nameof(KokosFieldNode), "Phase F");
+    public LLVMValueRef VisitLiteralString(KokosLiteralStringNode node) => throw NotYet(nameof(KokosLiteralStringNode), "needs a string runtime representation, Phase F");
+    public LLVMValueRef VisitMemberAccess(KokosMemberAccessNode node) => throw NotYet(nameof(KokosMemberAccessNode), "needs struct codegen, Phase F");
+    public LLVMValueRef VisitDestroyedExpression(KokosDestroyedExpressionNode node) => throw NotYet(nameof(KokosDestroyedExpressionNode), "Phase F — needs generational-reference runtime support");
+    public LLVMValueRef VisitFreeStatement(KokosFreeStatementNode node) => throw NotYet(nameof(KokosFreeStatementNode), "Phase F — needs generational-reference runtime support");
 }

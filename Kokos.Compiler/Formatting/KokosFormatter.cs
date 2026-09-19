@@ -143,6 +143,8 @@ public sealed class KokosFormatter : IKokosVisitor<string>
     public string VisitReturn(KokosReturnNode node) =>
         node.Expression is null ? "return;" : $"return {node.Expression.Accept(this)};";
 
+    public string VisitFreeStatement(KokosFreeStatementNode node) => $"free({node.Operand.Accept(this)});";
+
     public string VisitExpressionStatement(KokosExpressionStatementNode node) => $"{node.Expression.Accept(this)};";
 
     public string VisitIfStatement(KokosIfStatementNode node)

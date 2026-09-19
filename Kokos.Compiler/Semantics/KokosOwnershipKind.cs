@@ -6,12 +6,12 @@ namespace Kokos.Compiler.Semantics;
 /// <summary>
 /// The three ownership modifiers from the memory-model spec, plus <see cref="Inferred"/> for a
 /// binding with no explicit annotation and no computed default either. Parameters and struct fields
-/// get a real positional default (see <see cref="KokosModifierMapper"/>) the moment they're
-/// pointer-shaped, so <see cref="Inferred"/> only actually occurs for a value-shaped binding (where
-/// ownership is meaningless) or a <c>let</c> local with no annotation — locals need stack-vs-heap
-/// escape analysis to get a real default, which doesn't exist yet, so an unannotated local is still
-/// conservatively treated the same as <see cref="Owned"/> everywhere it matters (e.g. <c>destroyed()</c>
-/// checking) until a later phase.
+/// get a real positional default the moment they're pointer-shaped (see
+/// <see cref="KokosModifierMapper"/>); an unannotated pointer-shaped local defaults to
+/// <see cref="Owned"/> too, on the simplifying assumption that every owned value is heap-allocated
+/// (the real stack-vs-heap escape-analysis optimization is a deferred, later phase — it would only
+/// ever change *where* an owned value lives, never whether it's owned). <see cref="Inferred"/> only
+/// actually occurs for a value-shaped binding, where ownership is meaningless.
 /// </summary>
 public enum KokosOwnershipKind
 {
@@ -33,10 +33,12 @@ internal static class KokosModifierMapper
     /// (<paramref name="defaultWhenPointerShaped"/>) — but only when the resolved type is actually
     /// pointer-shaped. A value-shaped parameter/field (a primitive, a value struct, ...) has no
     /// ownership concept to default at all, so it stays <see cref="KokosOwnershipKind.Inferred"/>.
+    /// <paramref name="typeNode"/> is nullable so a <c>let</c> with no type annotation at all (nothing
+    /// to inspect for an explicit modifier) can still go through this overload.
     /// </summary>
-    public static KokosOwnershipKind OwnershipOf(KokosTypeNode typeNode, KokosType resolvedType, KokosOwnershipKind defaultWhenPointerShaped)
+    public static KokosOwnershipKind OwnershipOf(KokosTypeNode? typeNode, KokosType resolvedType, KokosOwnershipKind defaultWhenPointerShaped)
     {
-        if (ExplicitModifierOf(typeNode) is { } modifier)
+        if (typeNode is not null && ExplicitModifierOf(typeNode) is { } modifier)
             return MapModifier(modifier.ModifierToken.Kind);
 
         return resolvedType.IsPointerShaped ? defaultWhenPointerShaped : KokosOwnershipKind.Inferred;

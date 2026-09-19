@@ -604,4 +604,15 @@ public class ParserTests
         var ifStatement = Assert.IsType<KokosIfStatementNode>(unit.Functions[0].Body.Statements[0]);
         Assert.IsType<KokosDestroyedExpressionNode>(ifStatement.Condition);
     }
+
+    [Fact]
+    public void Parses_a_free_statement()
+    {
+        var unit = KokosParser.Parse("function f(m: manual Person) { free(m); }", out var diagnostics);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+
+        var freeStatement = Assert.IsType<KokosFreeStatementNode>(unit.Functions[0].Body.Statements[0]);
+        var operand = Assert.IsType<KokosIdentifierNode>(freeStatement.Operand);
+        Assert.Equal("m", operand.Name);
+    }
 }

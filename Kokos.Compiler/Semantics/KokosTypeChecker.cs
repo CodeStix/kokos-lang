@@ -56,7 +56,33 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
     private Dictionary<string, KokosBinding> _scope = new();
     private KokosType? _currentDeclaredReturnType;
     private List<KokosType> _currentReturnTypes = new();
+    private KokosOwnershipKind? _currentDeclaredReturnOwnership;
+    private List<KokosOwnershipKind> _currentReturnOwnerships = new();
     private KokosType? _expectedType;
+
+    /// <summary>
+    /// Move-checker state: every entry is either a binding name (a whole `owned` value has been
+    /// transferred away) or a `"name.field"` compound key (a partial move out of one of its fields) —
+    /// see <see cref="MarkTransferred"/>. Saved/restored alongside <see cref="_scope"/>.
+    /// </summary>
+    private HashSet<string> _consumed = new();
+
+    /// <summary>
+    /// Suppresses <see cref="VisitIdentifier"/>'s whole-value-moved check for the two read positions
+    /// that are legitimately not a whole-value use: an assignment's own identifier target (a write,
+    /// not a read) and a member-access's identifier base (reading `x` just to reach one field is fine
+    /// even if a *different* field of `x` was moved out — see <see cref="VisitMemberAccess"/>, which
+    /// does its own, more specific check instead).
+    /// </summary>
+    private bool _suppressWholeMoveCheck;
+
+    /// <summary>
+    /// Suppresses <see cref="VisitMemberAccess"/>'s "this specific field was already moved out" check
+    /// for exactly one occurrence: `x.field` as an assignment's own target, since writing into it is
+    /// the refill operation the spec describes, not a read of the stale value. The base `x`'s own
+    /// whole-moved check still applies regardless of this flag.
+    /// </summary>
+    private bool _suppressFieldMoveCheck;
 
     public KokosTypeChecker(KokosDeclarationTable table, KokosTypeResolver resolver, KokosDiagnosticBag diagnostics)
     {
@@ -146,7 +172,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         {
             _diagnostics.ReportError(node.NameToken.Span,
                 $"Cannot infer the return type of '{node.Name}' because it depends on itself; add an explicit return type annotation.");
-            var errorResult = new KokosFunctionType(ResolveParameterTypesOnly(node), KokosErrorType.Instance, node);
+            var errorResult = new KokosFunctionType(ResolveParameterTypesOnly(node), KokosErrorType.Instance, KokosOwnershipKind.Inferred, node);
             _functionTypes[node] = errorResult;
             return errorResult;
         }
@@ -165,9 +191,14 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         var outerScope = _scope;
         var outerDeclaredReturnType = _currentDeclaredReturnType;
         var outerReturnTypes = _currentReturnTypes;
+        var outerDeclaredReturnOwnership = _currentDeclaredReturnOwnership;
+        var outerReturnOwnerships = _currentReturnOwnerships;
+        var outerConsumed = _consumed;
 
         _scope = new Dictionary<string, KokosBinding>();
         _currentReturnTypes = [];
+        _currentReturnOwnerships = [];
+        _consumed = [];
 
         var parameterTypes = new List<KokosType>();
         foreach (var parameter in node.Parameters.Items)
@@ -179,11 +210,14 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         }
 
         _currentDeclaredReturnType = node.ReturnType is null ? null : _resolver.Resolve(node.ReturnType);
+        _currentDeclaredReturnOwnership = node.ReturnType is null ? null : KokosModifierMapper.OwnershipOf(node.ReturnType);
 
         try
         {
             node.Body.Accept(this);
             var effectiveReturnType = _currentDeclaredReturnType ?? InferReturnType(node, _currentReturnTypes);
+            var effectiveReturnOwnership = _currentDeclaredReturnOwnership
+                ?? InferReturnOwnership(node, _currentReturnOwnerships, effectiveReturnType);
 
             // A function stays implicitly void-like (no requirement) only when it has neither a
             // declared return type nor any return-with-a-value anywhere in its body.
@@ -193,13 +227,39 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
                 _diagnostics.ReportError(node.NameToken.Span, $"Not all code paths in '{node.Name}' return a value.");
             }
 
-            return new KokosFunctionType(parameterTypes, effectiveReturnType, node);
+            CheckNoOutstandingPartialMoves(node);
+
+            return new KokosFunctionType(parameterTypes, effectiveReturnType, effectiveReturnOwnership, node);
         }
         finally
         {
             _scope = outerScope;
             _currentDeclaredReturnType = outerDeclaredReturnType;
             _currentReturnTypes = outerReturnTypes;
+            _currentDeclaredReturnOwnership = outerDeclaredReturnOwnership;
+            _currentReturnOwnerships = outerReturnOwnerships;
+            _consumed = outerConsumed;
+        }
+    }
+
+    /// <summary>
+    /// The semantic half of "compiler-inserted <c>free()</c>": a scope-end release of an owned
+    /// binding is only legal once every field moved out of it has been restored. This doesn't
+    /// synthesize the release itself — there's no allocation to free yet (a later phase) — it just
+    /// validates that one would be legal.
+    /// </summary>
+    private void CheckNoOutstandingPartialMoves(KokosFunctionNode node)
+    {
+        foreach (var (name, binding) in _scope)
+        {
+            if (binding.Ownership != KokosOwnershipKind.Owned || _consumed.Contains(name))
+                continue;
+
+            if (_consumed.Any(entry => entry.StartsWith(name + ".", StringComparison.Ordinal)))
+            {
+                _diagnostics.ReportError(node.NameToken.Span,
+                    $"'{name}' still has a moved-out field that was never restored before the end of the function.");
+            }
         }
     }
 
@@ -216,6 +276,27 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             $"Cannot infer a return type for '{node.Name}': its return statements produce different types " +
             $"({string.Join(", ", returnTypes.Select(t => t.DisplayName).Distinct())}). Add an explicit return type annotation.");
         return KokosErrorType.Instance;
+    }
+
+    /// <summary>
+    /// Mirrors <see cref="InferReturnType"/> exactly, one level down: the ownership every return path
+    /// agrees on, or a diagnostic requiring an explicit modifier on the return type. A value-shaped
+    /// return (or a function with no value-returning path at all) has no ownership to agree on, so
+    /// this is skipped entirely rather than spuriously flagging it.
+    /// </summary>
+    private KokosOwnershipKind InferReturnOwnership(KokosFunctionNode node, List<KokosOwnershipKind> returnOwnerships, KokosType effectiveReturnType)
+    {
+        if (!effectiveReturnType.IsPointerShaped || returnOwnerships.Count == 0)
+            return KokosOwnershipKind.Inferred;
+
+        var first = returnOwnerships[0];
+        if (returnOwnerships.Skip(1).All(o => o == first))
+            return first;
+
+        _diagnostics.ReportError(node.NameToken.Span,
+            $"Cannot infer the return ownership for '{node.Name}': its return statements disagree " +
+            $"({string.Join(", ", returnOwnerships.Distinct())}). Add an explicit modifier on the return type.");
+        return KokosOwnershipKind.Inferred;
     }
 
     public KokosType VisitParameter(KokosParameterNode node) => _resolver.Resolve(node.Type);
@@ -262,8 +343,22 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         }
 
         var variableType = expected ?? initializerType;
-        var ownership = node.Type is null ? KokosOwnershipKind.Inferred : KokosModifierMapper.OwnershipOf(node.Type);
+
+        // No explicit annotation: prefer the initializer's own ownership when it's known (so `let y =
+        // someUnownedThing;` really is unowned) rather than blindly defaulting to owned; only fall
+        // back to the heap-only "owned by default" rule when the initializer's ownership can't be
+        // determined at all.
+        var ownership = node.Type is not null
+            ? KokosModifierMapper.OwnershipOf(node.Type, variableType, KokosOwnershipKind.Owned)
+            : TryGetOwnership(node.Initializer, out var inferredOwnership)
+                ? inferredOwnership
+                : (variableType.IsPointerShaped ? KokosOwnershipKind.Owned : KokosOwnershipKind.Inferred);
+
         _scope[node.Name] = new KokosBinding(variableType, ownership);
+
+        if (ownership == KokosOwnershipKind.Owned)
+            MarkTransferred(node.Initializer);
+
         return variableType;
     }
 
@@ -286,23 +381,70 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             _currentReturnTypes.Add(expressionType);
         }
 
+        if (node.Expression is not null)
+        {
+            // `return x` is unconditionally a transfer whenever x is owned, per spec — regardless of
+            // what the function's own declared return-type modifier says.
+            MarkTransferred(node.Expression);
+
+            if (_currentDeclaredReturnOwnership is null)
+            {
+                _currentReturnOwnerships.Add(TryGetOwnership(node.Expression, out var returnOwnership)
+                    ? returnOwnership
+                    : KokosOwnershipKind.Inferred);
+            }
+        }
+
         return expressionType;
     }
 
     public KokosType VisitExpressionStatement(KokosExpressionStatementNode node) => TypeOf(node.Expression);
 
+    /// <summary>
+    /// Implements the spec's conditional-move rule via a dataflow merge over <see cref="_consumed"/>:
+    /// a binding consumed on either branch is treated as consumed after the join — "even on paths
+    /// where it wasn't actually moved," since nothing here tries to disambiguate which branch ran. A
+    /// branch that <see cref="AlwaysReturns"/> never reaches the join, so its consumptions don't leak
+    /// into what follows it.
+    /// </summary>
     public KokosType VisitIfStatement(KokosIfStatementNode node)
     {
         CheckCondition(node.Condition);
+        var before = _consumed;
+
+        _consumed = new HashSet<string>(before);
         node.ThenBlock.Accept(this);
-        node.ElseBody?.Accept(this);
+        var thenResult = _consumed;
+
+        var elseResult = before;
+        if (node.ElseBody is not null)
+        {
+            _consumed = new HashSet<string>(before);
+            node.ElseBody.Accept(this);
+            elseResult = _consumed;
+        }
+
+        var merged = new HashSet<string>();
+        if (!AlwaysReturns(node.ThenBlock)) merged.UnionWith(thenResult);
+        if (node.ElseBody is null || !AlwaysReturns(node.ElseBody)) merged.UnionWith(elseResult);
+        _consumed = merged;
+
         return KokosUnknownType.Instance;
     }
 
     public KokosType VisitWhileStatement(KokosWhileStatementNode node)
     {
         CheckCondition(node.Condition);
+
+        // The loop may run zero or more times: seeding _consumed with a copy of the pre-loop set and
+        // just letting the body's own visit mutate it means the post-loop set is exactly
+        // pre-loop ∪ body-consumed — correct for "might not run" and "ran once," though it doesn't
+        // catch a binding consumed once per iteration being reused on the *next* iteration (no
+        // repeated-execution reasoning is attempted, mirroring AlwaysReturns(while) = false's existing
+        // precedent).
+        _consumed = new HashSet<string>(_consumed);
         node.Body.Accept(this);
+
         return KokosUnknownType.Instance;
     }
 
@@ -341,10 +483,55 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
     public KokosType VisitIdentifier(KokosIdentifierNode node)
     {
         if (_scope.TryGetValue(node.Name, out var binding))
+        {
+            if (!_suppressWholeMoveCheck)
+                CheckWholeValueAvailable(node.Name, node.NameToken.Span, binding.Ownership);
+
             return binding.Type;
+        }
 
         _diagnostics.ReportError(node.NameToken.Span, $"Unknown identifier '{node.Name}'.");
         return KokosErrorType.Instance;
+    }
+
+    /// <summary>Only ever fires for an `owned` binding — `unowned`/`manual` are always freely copyable, per spec, and never tracked here.</summary>
+    private void CheckWholeValueAvailable(string name, TextSpan span, KokosOwnershipKind ownership)
+    {
+        if (ownership != KokosOwnershipKind.Owned)
+            return;
+
+        if (_consumed.Contains(name))
+        {
+            _diagnostics.ReportError(span, $"'{name}' was already moved and cannot be used again.");
+        }
+        else if (_consumed.Any(entry => entry.StartsWith(name + ".", StringComparison.Ordinal)))
+        {
+            _diagnostics.ReportError(span, $"'{name}' cannot be used as a whole while one of its fields has been moved out.");
+        }
+    }
+
+    /// <summary>
+    /// Marks a transfer source consumed — called from exactly the three spec-listed transfer
+    /// positions (return, an owned-typed call argument, assignment/var-decl into an owned-typed
+    /// target). A bare identifier is a whole-value move; a direct one-level `x.field` access (where
+    /// `x` is itself owned and `field` is itself owned) is a partial move. Anything else (a call
+    /// result, a literal, deeper nesting) isn't a recognized transfer source in this phase and is left
+    /// alone — an ordinary, unmarked read.
+    /// </summary>
+    private void MarkTransferred(KokosExpressionNode source)
+    {
+        if (source is KokosIdentifierNode identifier && _scope.TryGetValue(identifier.Name, out var binding)
+            && binding.Ownership == KokosOwnershipKind.Owned)
+        {
+            _consumed.Add(identifier.Name);
+        }
+        else if (source is KokosMemberAccessNode { Target: KokosIdentifierNode baseId } access
+            && _scope.TryGetValue(baseId.Name, out var baseBinding) && baseBinding.Ownership == KokosOwnershipKind.Owned
+            && _expressionTypes.TryGetValue(access.Target, out var baseType) && baseType is KokosStructType structType
+            && FindField(structType, access.NameToken, access.MemberName) is { Ownership: KokosOwnershipKind.Owned })
+        {
+            _consumed.Add($"{baseId.Name}.{access.MemberName}");
+        }
     }
 
     public KokosType VisitLiteralNumber(KokosLiteralNumberNode node)
@@ -490,7 +677,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             return KokosErrorType.Instance;
         }
 
-        if (!TryGetDeclaredOwnership(node.Operand, out var ownership))
+        if (!TryGetOwnership(node.Operand, out var ownership))
         {
             _diagnostics.ReportError(node.DestroyedKeyword.Span,
                 "'destroyed()' can only be applied to a local variable, parameter, or field explicitly declared 'unowned' or 'manual'.");
@@ -507,7 +694,34 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         return KokosBoolType.Instance;
     }
 
-    private bool TryGetDeclaredOwnership(KokosExpressionNode expression, out KokosOwnershipKind ownership)
+    /// <summary>Releases a `manual` reference: `free(expr);`. Per spec, double-free/use-after-free on a `manual` handle is caught only by the runtime generation check, never statically — so this doesn't touch move-tracking state at all.</summary>
+    public KokosType VisitFreeStatement(KokosFreeStatementNode node)
+    {
+        var operandType = TypeOf(node.Operand);
+
+        if (operandType is not (KokosUnknownType or KokosErrorType)
+            && (!TryGetOwnership(node.Operand, out var ownership) || ownership != KokosOwnershipKind.Manual))
+        {
+            _diagnostics.ReportError(node.FreeKeyword.Span, "'free()' can only be called on a 'manual' reference.");
+        }
+
+        return KokosUnknownType.Instance;
+    }
+
+    /// <summary>The by-name-or-ordinal field lookup shared by every place that resolves a struct member access.</summary>
+    private static KokosStructField? FindField(KokosStructType structType, KokosToken nameToken, string memberName) =>
+        nameToken.Kind == TokenKind.NumberLiteral
+            ? (int.TryParse(memberName, out var ordinal) ? structType.FindField(ordinal) : null)
+            : structType.FindField(memberName);
+
+    /// <summary>
+    /// Resolves an expression's ownership where possible: a bound identifier, a direct struct-field
+    /// access, a construction call (always fresh and uniquely owned), or an ordinary function call
+    /// (whatever the callee's own return ownership resolved to). Anything else (a ternary, an
+    /// arithmetic result, ...) isn't tracked and returns false — used identically by `destroyed()`'s
+    /// and `free()`'s "cannot determine ownership" diagnostics.
+    /// </summary>
+    private bool TryGetOwnership(KokosExpressionNode expression, out KokosOwnershipKind ownership)
     {
         if (expression is KokosIdentifierNode identifier && _scope.TryGetValue(identifier.Name, out var binding))
         {
@@ -518,15 +732,25 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         if (expression is KokosMemberAccessNode access && _expressionTypes.TryGetValue(access.Target, out var targetType)
             && targetType is KokosStructType structType)
         {
-            var field = access.NameToken.Kind == TokenKind.NumberLiteral
-                ? (int.TryParse(access.MemberName, out var ordinal) ? structType.FindField(ordinal) : null)
-                : structType.FindField(access.MemberName);
-
+            var field = FindField(structType, access.NameToken, access.MemberName);
             if (field is not null)
             {
                 ownership = field.Ownership;
                 return true;
             }
+        }
+
+        if (expression is KokosCallNode { Callee: KokosIdentifierNode calleeName } && _table.TryGetStruct(calleeName.Name, out _))
+        {
+            // A construction call always produces a fresh, uniquely-owned value.
+            ownership = KokosOwnershipKind.Owned;
+            return true;
+        }
+
+        if (expression is KokosCallNode { Callee: KokosIdentifierNode fnName } && _table.TryGetFunction(fnName.Name, out var fnDecl))
+        {
+            ownership = GetFunctionType(fnDecl).ReturnOwnership;
+            return true;
         }
 
         ownership = KokosOwnershipKind.Inferred;
@@ -535,13 +759,48 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
 
     public KokosType VisitAssignment(KokosAssignmentNode node)
     {
-        var targetType = TypeOf(node.Target);
+        KokosType targetType;
+        if (node.Target is KokosIdentifierNode)
+        {
+            // Reassigning x itself is a write, not a read of x's old value — suppress the
+            // "already moved" check VisitIdentifier would otherwise apply to this occurrence.
+            var previousSuppress = _suppressWholeMoveCheck;
+            _suppressWholeMoveCheck = true;
+            try { targetType = TypeOf(node.Target); }
+            finally { _suppressWholeMoveCheck = previousSuppress; }
+        }
+        else if (node.Target is KokosMemberAccessNode)
+        {
+            // Writing into x.field is exactly the "refill" operation — it must not itself be flagged
+            // as "field already moved out" (the base x's *own* whole-moved check still applies).
+            var previousSuppress = _suppressFieldMoveCheck;
+            _suppressFieldMoveCheck = true;
+            try { targetType = TypeOf(node.Target); }
+            finally { _suppressFieldMoveCheck = previousSuppress; }
+        }
+        else
+        {
+            targetType = TypeOf(node.Target);
+        }
+
         var valueType = CheckExpression(node.Value, targetType);
 
         if (targetType is not (KokosUnknownType or KokosErrorType) && !IsAssignable(valueType, targetType))
         {
             _diagnostics.ReportError(node.EqualsToken.Span,
                 $"Cannot assign a value of type '{valueType.DisplayName}' to a target of type '{targetType.DisplayName}'.");
+        }
+
+        if (TryGetOwnership(node.Target, out var targetOwnership) && targetOwnership == KokosOwnershipKind.Owned)
+        {
+            // A fresh value is being written here — clear any stale "moved" marker for this exact
+            // target first (this is what makes reassignment/refilling a moved-out field legal again).
+            if (node.Target is KokosIdentifierNode targetIdentifier)
+                _consumed.RemoveWhere(entry => entry == targetIdentifier.Name || entry.StartsWith(targetIdentifier.Name + ".", StringComparison.Ordinal));
+            else if (node.Target is KokosMemberAccessNode { Target: KokosIdentifierNode baseId } targetAccess)
+                _consumed.Remove($"{baseId.Name}.{targetAccess.MemberName}");
+
+            MarkTransferred(node.Value);
         }
 
         return targetType;
@@ -573,16 +832,38 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             return enumType;
         }
 
-        var targetType = TypeOf(node.Target);
+        // Reading `x` just to reach one of its fields is a distinct kind of use from reading `x` as a
+        // whole: it's fine even if a *different* field of `x` was moved out, and if `x` as a whole
+        // was already moved, or *this specific* field was, that's a diagnostic here rather than the
+        // generic "already moved" one VisitIdentifier would otherwise give for the base alone.
+        KokosType targetType;
+        if (node.Target is KokosIdentifierNode baseIdentifier && _scope.TryGetValue(baseIdentifier.Name, out var baseBinding))
+        {
+            targetType = baseBinding.Type;
+            _expressionTypes[node.Target] = targetType;
+
+            if (_consumed.Contains(baseIdentifier.Name))
+            {
+                _diagnostics.ReportError(node.NameToken.Span, $"'{baseIdentifier.Name}' was already moved and cannot be used again.");
+            }
+            else if (!_suppressFieldMoveCheck && targetType is KokosStructType
+                && _consumed.Contains($"{baseIdentifier.Name}.{node.MemberName}"))
+            {
+                _diagnostics.ReportError(node.NameToken.Span,
+                    $"Field '{node.MemberName}' of '{baseIdentifier.Name}' has already been moved out.");
+            }
+        }
+        else
+        {
+            targetType = TypeOf(node.Target);
+        }
 
         if (targetType is KokosUnknownType or KokosErrorType)
             return KokosUnknownType.Instance;
 
         if (targetType is KokosStructType structType)
         {
-            var field = node.NameToken.Kind == TokenKind.NumberLiteral
-                ? (int.TryParse(node.MemberName, out var ordinal) ? structType.FindField(ordinal) : null)
-                : structType.FindField(node.MemberName);
+            var field = FindField(structType, node.NameToken, node.MemberName);
 
             if (field is not null)
                 return field.Type;
@@ -749,6 +1030,17 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             {
                 _diagnostics.ReportError(SpanOf(argument.Expression),
                     $"Cannot pass a value of type '{argType.DisplayName}' as argument {i + 1} of type '{expectedType.DisplayName}'.");
+            }
+
+            if (expectedType is not null && i < functionType.Declaration.Parameters.Items.Count)
+            {
+                // Reuses the exact same defaulting rule the callee's own body-check used for this
+                // parameter — an owned-typed parameter consumes its argument; unowned is a reborrow.
+                var parameterOwnership = KokosModifierMapper.OwnershipOf(
+                    functionType.Declaration.Parameters.Items[i].Type, expectedType, KokosOwnershipKind.Unowned);
+
+                if (parameterOwnership == KokosOwnershipKind.Owned)
+                    MarkTransferred(argument.Expression);
             }
         }
 

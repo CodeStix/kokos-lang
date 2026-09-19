@@ -12,12 +12,14 @@ public sealed class KokosFunctionType : KokosType
 {
     public IReadOnlyList<KokosType> ParameterTypes { get; }
     public KokosType ReturnType { get; }
+    public KokosOwnershipKind ReturnOwnership { get; }
     public KokosFunctionNode Declaration { get; }
 
-    public KokosFunctionType(IReadOnlyList<KokosType> parameterTypes, KokosType returnType, KokosFunctionNode declaration)
+    public KokosFunctionType(IReadOnlyList<KokosType> parameterTypes, KokosType returnType, KokosOwnershipKind returnOwnership, KokosFunctionNode declaration)
     {
         ParameterTypes = parameterTypes;
         ReturnType = returnType;
+        ReturnOwnership = returnOwnership;
         Declaration = declaration;
     }
 

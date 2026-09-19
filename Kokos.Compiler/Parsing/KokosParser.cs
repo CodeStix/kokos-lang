@@ -316,6 +316,7 @@ public sealed class KokosParser
         TokenKind.ReturnKeyword => ParseReturn(),
         TokenKind.IfKeyword => ParseIfStatement(),
         TokenKind.WhileKeyword => ParseWhileStatement(),
+        TokenKind.FreeKeyword => ParseFreeStatement(),
         _ => ParseExpressionStatement(),
     };
 
@@ -366,6 +367,16 @@ public sealed class KokosParser
         var initializer = ParseExpression();
         var semicolon = Expect(TokenKind.Semicolon, "';'");
         return new KokosVarDeclNode(letKeyword, name, colon, type, equals, initializer, semicolon);
+    }
+
+    private KokosFreeStatementNode ParseFreeStatement()
+    {
+        var freeKeyword = Advance();
+        var openParen = Expect(TokenKind.OpenParen, "'('");
+        var operand = ParseExpression();
+        var closeParen = Expect(TokenKind.CloseParen, "')'");
+        var semicolon = Expect(TokenKind.Semicolon, "';'");
+        return new KokosFreeStatementNode(freeKeyword, openParen, operand, closeParen, semicolon);
     }
 
     private KokosReturnNode ParseReturn()

@@ -9,7 +9,7 @@ namespace Kokos.CodeGen;
 /// stays a one-file change.
 ///
 /// Phase A only needs the primitive family — structs/enums/arrays/optionals/unions all need an
-/// allocation strategy that's entangled with the ownership work (Phase E), so mapping them is left
+/// allocation strategy that's entangled with the ownership work (Phase F), so mapping them is left
 /// unimplemented here rather than guessed at now.
 /// </summary>
 public sealed class KokosLlvmTypeMapper
@@ -29,7 +29,7 @@ public sealed class KokosLlvmTypeMapper
 
         _ => throw new NotSupportedException(
             $"{type.GetType().Name} ('{type.DisplayName}') has no LLVM representation yet — " +
-            "structs/enums/arrays/optionals/unions are Phase E work, once allocation strategy exists."),
+            "structs/enums/arrays/optionals/unions are Phase F work, once allocation strategy exists."),
     };
 
     private LLVMTypeRef MapPrimitive(KokosPrimitiveType primitive) => primitive.Kind switch

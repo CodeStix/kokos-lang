@@ -355,8 +355,10 @@ public class TypeCheckerTests
     }
 
     [Fact]
-    public void Destroyed_on_a_call_result_is_a_diagnostic()
+    public void Destroyed_on_a_call_returning_unowned_succeeds()
     {
+        // Phase E: a plain function call's ownership resolves to the callee's own return ownership,
+        // so this is no longer an unresolvable shape the way it was in Phase C.
         const string source = """
             struct Person { age: Int }
 
@@ -366,6 +368,25 @@ public class TypeCheckerTests
 
         var (unit, _, checker, diagnostics) = Setup(source);
         checker.VisitFunction((KokosFunctionNode)unit.Members[2]);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Destroyed_on_a_ternary_result_is_a_diagnostic()
+    {
+        // A ternary's ownership still isn't tracked (branch-agreement for ownership is out of scope),
+        // so this remains a genuinely unresolvable shape.
+        const string source = """
+            struct Person { age: Int }
+
+            function f(cond: Bool, a: unowned Person, b: unowned Person): Bool {
+                return destroyed(cond then a else b);
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        CheckFunction(checker, unit, memberIndex: 1);
 
         Assert.True(diagnostics.HasErrors);
     }
@@ -854,5 +875,340 @@ public class TypeCheckerTests
         CheckFunction(checker, unit);
 
         Assert.True(diagnostics.HasErrors);
+    }
+
+    // --- Move checker: whole-value transfers -----------------------------------------------------
+
+    [Fact]
+    public void ChooseOldest_shaped_function_with_owned_parameters_type_checks_cleanly()
+    {
+        const string source = """
+            struct Person { age: Int }
+
+            function chooseOldest(a: owned Person, b: owned Person): owned Person {
+                if a.age > b.age {
+                    return a;
+                } else {
+                    return b;
+                }
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[1]);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Using_an_owned_binding_again_after_returning_it_is_a_diagnostic()
+    {
+        const string source = """
+            struct Person { age: Int }
+
+            function consume(p: owned Person): Int { return p.age; }
+            function f(a: owned Person): owned Person {
+                consume(a);
+                return a;
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[2]);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Passing_an_owned_argument_twice_is_a_diagnostic_on_the_second_use()
+    {
+        const string source = """
+            struct Person { age: Int }
+
+            function consume(p: owned Person): Int { return p.age; }
+            function f(a: owned Person): Int {
+                consume(a);
+                return consume(a);
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[2]);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Passing_an_unowned_argument_twice_is_not_a_diagnostic()
+    {
+        const string source = """
+            struct Person { age: Int }
+
+            function peek(p: unowned Person): Int { return p.age; }
+            function f(a: owned Person): Int {
+                peek(a);
+                return peek(a);
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[2]);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Conditional_move_consumed_on_only_one_branch_then_used_after_the_join_is_a_diagnostic()
+    {
+        const string source = """
+            struct Person { age: Int }
+
+            function consume(p: owned Person): Int { return p.age; }
+            function f(cond: Bool, a: owned Person): Int {
+                if cond {
+                    consume(a);
+                }
+                return consume(a);
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[2]);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Reassigning_a_moved_owned_local_makes_it_usable_again()
+    {
+        const string source = """
+            struct Person { age: Int }
+
+            function f(a: owned Person, b: owned Person): Int {
+                consume(a);
+                a = b;
+                return consume(a);
+            }
+            function consume(p: owned Person): Int { return p.age; }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[1]);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    // --- Move checker: partial moves ---------------------------------------------------------------
+
+    [Fact]
+    public void SwapFavorite_shaped_function_type_checks_cleanly()
+    {
+        const string source = """
+            struct Person { age: Int }
+            struct Family { favoritePerson: owned Person, otherPerson: owned Person }
+
+            function swapFavorite(a: owned Family, b: owned Family) {
+                let temp = a.favoritePerson;
+                a.favoritePerson = b.favoritePerson;
+                b.favoritePerson = temp;
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[2]);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Using_a_moved_out_field_before_it_is_refilled_is_a_diagnostic()
+    {
+        const string source = """
+            struct Person { age: Int }
+            struct Family { favoritePerson: owned Person }
+
+            function f(a: owned Family): Int {
+                let temp = a.favoritePerson;
+                return a.favoritePerson.age;
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[2]);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Using_a_different_untouched_field_after_a_partial_move_is_not_a_diagnostic()
+    {
+        const string source = """
+            struct Person { age: Int }
+            struct Family { favoritePerson: owned Person, otherPerson: owned Person }
+
+            function f(a: owned Family, replacement: owned Person): Int {
+                let temp = a.favoritePerson;
+                let result = a.otherPerson.age;
+                a.favoritePerson = replacement;
+                return result;
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[2]);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Returning_a_struct_whole_before_refilling_a_moved_out_field_is_a_diagnostic()
+    {
+        const string source = """
+            struct Person { age: Int }
+            struct Family { favoritePerson: owned Person }
+
+            function f(a: owned Family): owned Family {
+                let temp = a.favoritePerson;
+                return a;
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[2]);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void SwapFavorite_shaped_function_allows_returning_both_families_whole_after_refilling()
+    {
+        const string source = """
+            struct Person { age: Int }
+            struct Family { favoritePerson: owned Person }
+
+            function f(a: owned Family, b: owned Family): owned Family {
+                let temp = a.favoritePerson;
+                a.favoritePerson = b.favoritePerson;
+                b.favoritePerson = temp;
+                return a;
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[2]);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    // --- free() ------------------------------------------------------------------------------------
+
+    [Fact]
+    public void Free_on_a_manual_binding_is_clean()
+    {
+        var (unit, _, checker, diagnostics) = Setup("struct Person { age: Int } function f(m: manual Person) { free(m); }");
+        CheckFunction(checker, unit, memberIndex: 1);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Free_on_an_owned_binding_is_a_diagnostic()
+    {
+        var (unit, _, checker, diagnostics) = Setup("struct Person { age: Int } function f(m: owned Person) { free(m); }");
+        CheckFunction(checker, unit, memberIndex: 1);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Free_on_an_unowned_binding_is_a_diagnostic()
+    {
+        var (unit, _, checker, diagnostics) = Setup("struct Person { age: Int } function f(m: unowned Person) { free(m); }");
+        CheckFunction(checker, unit, memberIndex: 1);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    // --- Return-ownership inference ------------------------------------------------------------------
+
+    [Fact]
+    public void Return_ownership_infers_unowned_when_every_path_returns_an_unowned_identifier()
+    {
+        const string source = """
+            struct Person { age: Int }
+
+            function f(cond: Bool, a: unowned Person, b: unowned Person) {
+                if cond {
+                    return a;
+                } else {
+                    return b;
+                }
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        var functionType = CheckFunction(checker, unit, memberIndex: 1);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+        Assert.Equal(KokosOwnershipKind.Unowned, functionType.ReturnOwnership);
+    }
+
+    [Fact]
+    public void Return_ownership_disagreement_across_paths_is_a_diagnostic()
+    {
+        const string source = """
+            struct Person { age: Int }
+
+            function f(cond: Bool, a: owned Person, b: unowned Person) {
+                if cond {
+                    return a;
+                } else {
+                    return b;
+                }
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        CheckFunction(checker, unit, memberIndex: 1);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Explicit_return_ownership_annotation_is_honored_even_if_the_body_would_infer_differently()
+    {
+        const string source = """
+            struct Person { age: Int }
+
+            function f(a: owned Person): unowned Person {
+                return a;
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        var functionType = CheckFunction(checker, unit, memberIndex: 1);
+
+        Assert.Equal(KokosOwnershipKind.Unowned, functionType.ReturnOwnership);
+    }
+
+    [Fact]
+    public void Let_binding_from_a_call_returning_unowned_is_itself_unowned_not_defaulted_to_owned()
+    {
+        const string source = """
+            struct Person { age: Int }
+
+            function makeUnowned(p: unowned Person): unowned Person { return p; }
+            function f(p: unowned Person): Bool {
+                let y = makeUnowned(p);
+                return destroyed(y);
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        var functionType = CheckFunction(checker, unit, memberIndex: 2);
+
+        // destroyed(y) only succeeds if y actually came out 'unowned' rather than defaulted to 'owned'.
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+        Assert.Same(KokosBoolType.Instance, functionType.ReturnType);
     }
 }
