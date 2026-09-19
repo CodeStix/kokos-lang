@@ -170,10 +170,22 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         return default;
     }
 
+    /// <summary>
+    /// Only an <c>export</c>-marked function is a real public symbol of this module — every other
+    /// function it defines (including a plain helper with no modifier) is an internal implementation
+    /// detail and gets `internal` linkage so it isn't visible from outside. An <c>import</c> function
+    /// has no body at all (a pure declaration referring to a symbol defined elsewhere); its linkage
+    /// stays the default `external` so it can still bind to that real symbol.
+    /// </summary>
     private LLVMValueRef DeclareFunction(KokosFunctionNode node)
     {
         var llvmFunctionType = MapFunctionSignature(_checker.FunctionTypes[node]);
-        return _module.AddFunction(node.Name, llvmFunctionType);
+        var function = _module.AddFunction(node.Name, llvmFunctionType);
+
+        if (node.Body is not null && !node.IsExported)
+            function.Linkage = LLVMLinkage.LLVMInternalLinkage;
+
+        return function;
     }
 
     /// <summary>Only ever called for a function with a real body (an `import function` is declared, never defined) — see <see cref="VisitCompilationUnit"/>.</summary>

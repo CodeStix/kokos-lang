@@ -51,6 +51,14 @@ internal class Program
             return 1;
         }
 
+        // Only an 'export'-marked function is a public symbol of the compiled module — running 'main'
+        // from here is exactly the same relationship as a C caller invoking an exported function.
+        if (!mainEntry.Key.IsExported)
+        {
+            Console.Error.WriteLine("'main' must be marked 'export' to be run (e.g. 'export function main(): Int { ... }').");
+            return 1;
+        }
+
         try
         {
             var generator = new KokosCodeGenerator(table, checker, Path.GetFileNameWithoutExtension(path));

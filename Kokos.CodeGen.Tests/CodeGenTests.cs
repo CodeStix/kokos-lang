@@ -46,7 +46,7 @@ public class CodeGenTests
     [Fact]
     public void Add_function_computes_the_correct_sum()
     {
-        using var jit = GenerateAndJit("function add(a: Int, b: Int): Int { return a + b; }");
+        using var jit = GenerateAndJit("export function add(a: Int, b: Int): Int { return a + b; }");
 
         var add = jit.GetFunction<BinaryLongFunc>("add");
 
@@ -56,7 +56,7 @@ public class CodeGenTests
     [Fact]
     public void Sized_primitive_arithmetic_computes_correctly()
     {
-        using var jit = GenerateAndJit("function add8(a: Int8, b: Int8): Int8 { return a + b; }");
+        using var jit = GenerateAndJit("export function add8(a: Int8, b: Int8): Int8 { return a + b; }");
 
         var add8 = jit.GetFunction<BinarySByteFunc>("add8");
 
@@ -66,7 +66,7 @@ public class CodeGenTests
     [Fact]
     public void Floating_point_arithmetic_computes_correctly()
     {
-        using var jit = GenerateAndJit("function multiply(a: Float64, b: Float64): Float64 { return a * b; }");
+        using var jit = GenerateAndJit("export function multiply(a: Float64, b: Float64): Float64 { return a * b; }");
 
         var multiply = jit.GetFunction<BinaryDoubleFunc>("multiply");
 
@@ -77,7 +77,7 @@ public class CodeGenTests
     public void Let_based_computation_produces_the_correct_result()
     {
         using var jit = GenerateAndJit(
-            "function compute(x: Int): Int { let doubled = x + x; let tripled = doubled + x; return tripled; }");
+            "export function compute(x: Int): Int { let doubled = x + x; let tripled = doubled + x; return tripled; }");
 
         var compute = jit.GetFunction<UnaryLongFunc>("compute");
 
@@ -87,7 +87,7 @@ public class CodeGenTests
     [Fact]
     public void Reassignment_updates_the_stored_value()
     {
-        using var jit = GenerateAndJit("function reset(x: Int): Int { let y = x; y = 100; return y; }");
+        using var jit = GenerateAndJit("export function reset(x: Int): Int { let y = x; y = 100; return y; }");
 
         var reset = jit.GetFunction<UnaryLongFunc>("reset");
 
@@ -101,7 +101,7 @@ public class CodeGenTests
             """
             function double(x: Int): Int { return x + x; }
 
-            function quadruple(x: Int): Int { return double(double(x)); }
+            export function quadruple(x: Int): Int { return double(double(x)); }
             """);
 
         var quadruple = jit.GetFunction<UnaryLongFunc>("quadruple");
@@ -114,7 +114,7 @@ public class CodeGenTests
     {
         using var jit = GenerateAndJit(
             """
-            function useHelper(x: Int): Int { return helper(x) + 1; }
+            export function useHelper(x: Int): Int { return helper(x) + 1; }
 
             function helper(x: Int): Int { return x * 2; }
             """);
@@ -127,7 +127,7 @@ public class CodeGenTests
     [Fact]
     public void Subtraction_and_division_compute_correctly()
     {
-        using var jit = GenerateAndJit("function combine(a: Int, b: Int, c: Int): Int { return (a - b) / c; }");
+        using var jit = GenerateAndJit("export function combine(a: Int, b: Int, c: Int): Int { return (a - b) / c; }");
 
         var combine = jit.GetFunction<TernaryLongFunc>("combine");
 
@@ -142,7 +142,7 @@ public class CodeGenTests
         // of Person structs.
         using var jit = GenerateAndJit(
             """
-            function chooseOldest(ageA: Int, ageB: Int): Int {
+            export function chooseOldest(ageA: Int, ageB: Int): Int {
                 if ageA > ageB {
                     return ageA;
                 } else {
@@ -162,7 +162,7 @@ public class CodeGenTests
     {
         using var jit = GenerateAndJit(
             """
-            function sumUpTo(n: Int): Int {
+            export function sumUpTo(n: Int): Int {
                 let total = 0;
                 let i = 1;
                 while i <= n {
@@ -194,7 +194,7 @@ public class CodeGenTests
         // how a bare i1 argument would be marshaled by a plain delegate call.
         using var jit = GenerateAndJit(
             """
-            function pick(flag: Int, a: Int, b: Int): Int {
+            export function pick(flag: Int, a: Int, b: Int): Int {
                 return flag != 0 then a else b;
             }
             """);
@@ -214,7 +214,7 @@ public class CodeGenTests
             """
             struct Point { x: Int, y: Int }
 
-            function makeX(): Int {
+            export function makeX(): Int {
                 let p = Point(x: 10, y: 20);
                 return p.x;
             }
@@ -232,7 +232,7 @@ public class CodeGenTests
             """
             struct Point { x: Int, y: Int }
 
-            function moveAndReadX(): Int {
+            export function moveAndReadX(): Int {
                 let p = Point(x: 10, y: 20);
                 p.x = 99;
                 return p.x;
@@ -256,7 +256,7 @@ public class CodeGenTests
                 return p.x;
             }
 
-            function f(): Int {
+            export function f(): Int {
                 let original = Point(x: 10, y: 20);
                 mutateCopy(original);
                 return original.x;
@@ -282,14 +282,16 @@ public class CodeGenTests
             """
             struct Node { data: Int, next: Node }
 
-            function readValue(n: Node): Int {
+            export function readValue(n: unmanaged Node): Int {
                 return n.data;
             }
             """);
 
         // Resolving the symbol (without calling it — there's no valid Node pointer to pass from
         // .NET, per the scope note on struct/delegate boundaries) proves the function actually
-        // linked successfully.
+        // linked successfully. 'unmanaged' (rather than the Phase D default 'unowned') is what makes
+        // this an export-legal signature at all, per the C-interop phase's boundary rule — it doesn't
+        // change what's being proven here, since the function is never actually called.
         jit.GetFunction<UnaryPointerToLongFunc>("readValue");
     }
 
@@ -306,7 +308,7 @@ public class CodeGenTests
             """
             struct Pair { Int, Int }
 
-            function f(): Int {
+            export function f(): Int {
                 let p = Pair(10, 20);
                 return p.0 + p.1;
             }
@@ -332,7 +334,7 @@ public class CodeGenTests
                 }
             }
 
-            function pickAge(ageA: Int, ageB: Int): Int {
+            export function pickAge(ageA: Int, ageB: Int): Int {
                 let a = Person(age: ageA);
                 let b = Person(age: ageB);
                 return chooseOldest(a, b).age;
@@ -359,7 +361,7 @@ public class CodeGenTests
                 b.favoritePerson = temp;
             }
 
-            function swapAndReadA(ageA: Int, ageB: Int): Int {
+            export function swapAndReadA(ageA: Int, ageB: Int): Int {
                 let a = Family(favoritePerson: Person(age: ageA));
                 let b = Family(favoritePerson: Person(age: ageB));
                 swapFavorite(a, b);
@@ -381,7 +383,7 @@ public class CodeGenTests
             """
             struct Person { age: Int }
 
-            function f(): Int {
+            export function f(): Int {
                 let p = Person(age: 5);
                 let q: unowned Person = p;
                 if destroyed(q) {
@@ -406,7 +408,7 @@ public class CodeGenTests
             """
             struct Person { age: Int }
 
-            function f(): Int {
+            export function f(): Int {
                 let p: manual Person = Person(age: 5);
                 let q: unowned Person = p;
                 free(p);
@@ -433,7 +435,7 @@ public class CodeGenTests
 
             function readAge(p: Person): Int { return p.age; }
 
-            function f(): Int {
+            export function f(): Int {
                 let ownedPerson = Person(age: 42);
                 return readAge(ownedPerson);
             }
@@ -463,7 +465,7 @@ public class CodeGenTests
                 }
             }
 
-            function f(ageA: Int, ageB: Int): Int {
+            export function f(ageA: Int, ageB: Int): Int {
                 let a = Person(age: ageA);
                 let b = Person(age: ageB);
                 let watchB: unowned Person = b;
@@ -491,7 +493,7 @@ public class CodeGenTests
             """
             import function abs(n: Int32): Int32;
 
-            function myAbs(n: Int32): Int32 { return abs(n); }
+            export function myAbs(n: Int32): Int32 { return abs(n); }
             """);
 
         var myAbs = jit.GetFunction<UnaryIntFunc>("myAbs");
@@ -563,7 +565,7 @@ public class CodeGenTests
 
             export function readAge(p: unmanaged Person): Int { return p.age; }
 
-            function makeAndRead(): Int {
+            export function makeAndRead(): Int {
                 let ownedPerson = Person(age: 99);
                 return readAge(ownedPerson);
             }
