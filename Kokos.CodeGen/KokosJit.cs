@@ -39,7 +39,25 @@ public sealed unsafe class KokosJit : IDisposable
         var addError = jit.AddLLVMIRModule(jit.MainJITDylib, threadSafeModule);
         ThrowIfError(addError, "adding the generated module to the LLJIT");
 
+        AddProcessSymbolGenerator(jit.MainJITDylib);
+
         return new KokosJit(jit);
+    }
+
+    /// <summary>
+    /// Lets generated IR call the host process's own <c>malloc</c>/<c>free</c> (via
+    /// <c>LLVMBuilderRef.BuildMalloc</c>/<c>BuildFree</c>, which declare and call them under the hood)
+    /// by resolving unknown symbols against this process's own loaded modules — the .NET host already
+    /// links against the C runtime, so <c>malloc</c>/<c>free</c> are already present in-process; no
+    /// custom allocator/thunk needed. <c>Filter</c> null means "no filtering, resolve anything found."
+    /// </summary>
+    private static void AddProcessSymbolGenerator(LLVMOrcJITDylibRef dylib)
+    {
+        LLVMOrcOpaqueDefinitionGenerator* generator;
+        var error = LLVM.OrcCreateDynamicLibrarySearchGeneratorForProcess(&generator, 0, null, null);
+        ThrowIfError(error, "creating the process dynamic-library search generator");
+
+        dylib.AddGenerator(generator);
     }
 
     private static void EnsureNativeTargetInitialized()

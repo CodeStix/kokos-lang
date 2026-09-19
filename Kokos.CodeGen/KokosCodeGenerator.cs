@@ -6,19 +6,22 @@ using LLVMSharp.Interop;
 namespace Kokos.CodeGen;
 
 /// <summary>
-/// Emits LLVM IR for the current ownership-free, branch-free subset of Kokos: primitives,
-/// arithmetic, <c>let</c>, <c>return</c>, and calls between functions declared in the same file.
-/// A fourth implementer of <see cref="IKokosVisitor{T}"/>, alongside
-/// <see cref="Formatting.KokosFormatter"/>, <see cref="KokosTypeResolver"/> and
-/// <see cref="KokosTypeChecker"/> — same established pattern, <c>T = LLVMValueRef</c> this time.
+/// Emits LLVM IR for primitives, arithmetic, branching, and — as of Phase F — reference and value
+/// structs (construction, field access/assignment, passing as pointers/by value between functions;
+/// tuples fall out of this for free, since the semantic layer already models one as a
+/// <see cref="KokosStructType"/> with a null name). A fourth implementer of
+/// <see cref="IKokosVisitor{T}"/>, alongside <see cref="Formatting.KokosFormatter"/>,
+/// <see cref="KokosTypeResolver"/> and <see cref="KokosTypeChecker"/> — same established pattern,
+/// <c>T = LLVMValueRef</c> this time.
 ///
 /// Never re-derives type information: every resolved type it needs comes from the
 /// already-run <see cref="KokosTypeChecker"/> passed into the constructor
 /// (<see cref="KokosTypeChecker.FunctionTypes"/> and <see cref="KokosTypeChecker.ExpressionTypes"/>).
 ///
-/// Structs, enums, arrays, optionals, unions, and member access/calls all throw
-/// <see cref="NotSupportedException"/> — they need an allocation strategy that's entangled with the
-/// ownership work (a later phase), so it isn't guessed at here.
+/// Generational references (the generation field, runtime dereference checks, real
+/// <c>free()</c>/<c>destroyed()</c>, compiler-inserted scope-end release) and enums/arrays/optionals/
+/// unions all still throw <see cref="NotSupportedException"/> — no allocation was ever the blocker
+/// for those anymore after this phase; they each still need their own chosen representation.
 /// </summary>
 public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
 {
@@ -68,8 +71,15 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         return _module;
     }
 
-    private LLVMTypeRef MapFunctionSignature(KokosFunctionType functionType) =>
-        LLVMTypeRef.CreateFunction(_typeMapper.Map(functionType.ReturnType), functionType.ParameterTypes.Select(_typeMapper.Map).ToArray());
+    private LLVMTypeRef MapFunctionSignature(KokosFunctionType functionType)
+    {
+        // KokosUnknownType as a *return* type specifically means "no declared or inferred return
+        // value at all" (a function with neither a declared return type nor any return-with-a-value
+        // anywhere in its body, per KokosTypeChecker.CheckFunctionCore) — the one place this sentinel
+        // is a legitimate type to map, rather than a bug elsewhere.
+        var returnType = functionType.ReturnType is KokosUnknownType ? Context.VoidType : _typeMapper.Map(functionType.ReturnType);
+        return LLVMTypeRef.CreateFunction(returnType, functionType.ParameterTypes.Select(_typeMapper.Map).ToArray());
+    }
 
     // --- Terminator-tracking wrappers (see _blockTerminated) --------------------------------------
 
@@ -154,6 +164,14 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
             }
 
             node.Body.Accept(this);
+
+            // A function with no declared return type and no return-with-a-value anywhere in its
+            // body (checked as legitimately void-like by KokosTypeChecker) is allowed to simply fall
+            // off the end without an explicit `return;` — every LLVM basic block still needs an
+            // explicit terminator, so supply the implicit one here.
+            if (!_blockTerminated)
+                BuildRetVoid();
+
             function.VerifyFunction(LLVMVerifierFailureAction.LLVMPrintMessageAction);
         }
         finally
@@ -375,22 +393,71 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
 
     public LLVMValueRef VisitAssignment(KokosAssignmentNode node)
     {
-        if (node.Target is not KokosIdentifierNode identifier)
-            throw new NotSupportedException("Only assignment to a plain local is supported in Phase A (member-target assignment needs struct codegen).");
-
         var value = node.Value.Accept(this);
-        var (pointer, _) = _scope[identifier.Name];
-        _builder.BuildStore(value, pointer);
-        return value;
+
+        if (node.Target is KokosIdentifierNode identifier)
+        {
+            var (pointer, _) = _scope[identifier.Name];
+            _builder.BuildStore(value, pointer);
+            return value;
+        }
+
+        if (node.Target is KokosMemberAccessNode access)
+        {
+            var targetType = _checker.ExpressionTypes[access.Target];
+
+            if (targetType is KokosStructType { IsValueType: true } valueStructType)
+            {
+                if (access.Target is not KokosIdentifierNode baseIdentifier)
+                {
+                    throw new NotSupportedException(
+                        "Assigning into a value struct's field is only supported when the struct is a plain " +
+                        "local (e.g. 'p.field = x'), not a nested field access two levels deep.");
+                }
+
+                // An LLVM aggregate can't be partially stored into — read-modify-write the whole
+                // thing back into the base's alloca.
+                var (basePointer, baseLlvmType) = _scope[baseIdentifier.Name];
+                var current = _builder.BuildLoad2(baseLlvmType, basePointer, "struct.load");
+                var field = FindField(valueStructType, access);
+                var updated = _builder.BuildInsertValue(current, value, (uint)field.OrdinalPosition, "struct.update");
+                _builder.BuildStore(updated, basePointer);
+                return value;
+            }
+
+            if (targetType is KokosStructType referenceStructType)
+            {
+                var basePointer = access.Target.Accept(this);
+                var bodyType = _typeMapper.MapStructBody(referenceStructType);
+                var field = FindField(referenceStructType, access);
+                var fieldPointer = _builder.BuildStructGEP2(bodyType, basePointer, (uint)field.OrdinalPosition, "fieldptr");
+                _builder.BuildStore(value, fieldPointer);
+                return value;
+            }
+        }
+
+        throw new NotSupportedException($"Unsupported assignment target shape: {node.Target.GetType().Name}.");
     }
+
+    /// <summary>The by-name-or-ordinal field lookup, matching <c>KokosTypeChecker</c>'s already-validated resolution for the same node.</summary>
+    private static KokosStructField FindField(KokosStructType structType, KokosMemberAccessNode access) =>
+        (access.NameToken.Kind == TokenKind.NumberLiteral
+            ? (int.TryParse(access.MemberName, out var ordinal) ? structType.FindField(ordinal) : null)
+            : structType.FindField(access.MemberName))!;
 
     public LLVMValueRef VisitCall(KokosCallNode node)
     {
+        if (node.Callee is KokosIdentifierNode calleeName && _table.TryGetStruct(calleeName.Name, out _))
+        {
+            return GenerateConstructionCall(node, (KokosStructType)_checker.ExpressionTypes[node]);
+        }
+
         if (node.Callee is not KokosIdentifierNode calleeIdentifier || !_table.TryGetFunction(calleeIdentifier.Name, out var calleeDecl))
         {
             throw new NotSupportedException(
-                "Only direct calls to a function declared in this file are supported in Phase A — construction " +
-                "calls, enum-variant construction, and member calls need an allocation strategy first (Phase F).");
+                "Only direct calls to a function declared in this file, or a struct/tuple construction " +
+                "call, are supported so far — enum-variant construction and member calls still need a " +
+                "chosen representation (Phase G+).");
         }
 
         var callee = _module.GetNamedFunction(calleeIdentifier.Name);
@@ -398,6 +465,47 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         var args = node.Arguments.Items.Select(a => a.Expression.Accept(this)).ToArray();
 
         return _builder.BuildCall2(calleeLlvmType, callee, args, "calltmp");
+    }
+
+    /// <summary>
+    /// A reference struct is heap-allocated via <c>BuildMalloc</c> (declares and calls the target's
+    /// <c>malloc</c> under the hood, sized and typed to the struct's body) and each argument is stored
+    /// into its field slot via <c>BuildStructGEP2</c>. A value struct needs no allocation at all — it's
+    /// built directly as an SSA aggregate, starting from an undef value and inserting each argument in
+    /// turn. Argument-to-field matching (by name, or positionally against
+    /// <see cref="KokosStructField.OrdinalPosition"/>) mirrors <c>KokosTypeChecker.CheckConstructionCall</c>
+    /// exactly, which has already fully validated this call — codegen only needs to *emit* it.
+    /// </summary>
+    private LLVMValueRef GenerateConstructionCall(KokosCallNode node, KokosStructType structType)
+    {
+        var bodyType = _typeMapper.MapStructBody(structType);
+        var arguments = node.Arguments.Items;
+
+        if (structType.IsValueType)
+        {
+            var aggregate = bodyType.Undef;
+            for (var i = 0; i < arguments.Count; i++)
+            {
+                var argument = arguments[i];
+                var field = argument.Name is not null ? structType.FindField(argument.Name) : structType.FindField(i);
+                var value = argument.Expression.Accept(this);
+                aggregate = _builder.BuildInsertValue(aggregate, value, (uint)field!.OrdinalPosition, "ctor");
+            }
+
+            return aggregate;
+        }
+
+        var instance = _builder.BuildMalloc(bodyType, structType.Name ?? "tuple");
+        for (var i = 0; i < arguments.Count; i++)
+        {
+            var argument = arguments[i];
+            var field = argument.Name is not null ? structType.FindField(argument.Name) : structType.FindField(i);
+            var value = argument.Expression.Accept(this);
+            var fieldPointer = _builder.BuildStructGEP2(bodyType, instance, (uint)field!.OrdinalPosition, "fieldptr");
+            _builder.BuildStore(value, fieldPointer);
+        }
+
+        return instance;
     }
 
     public LLVMValueRef VisitArgument(KokosArgumentNode node) => node.Expression.Accept(this);
@@ -415,6 +523,30 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         return KokosLlvmTypeMapper.IsFloatingPoint(operandType) ? _builder.BuildFNeg(operand) : _builder.BuildNeg(operand);
     }
 
+    public LLVMValueRef VisitMemberAccess(KokosMemberAccessNode node)
+    {
+        var targetType = _checker.ExpressionTypes[node.Target];
+
+        if (targetType is not KokosStructType structType)
+        {
+            throw NotYet(nameof(KokosMemberAccessNode),
+                "target isn't a struct/tuple — enum-variant access and member calls still need a chosen representation");
+        }
+
+        var field = FindField(structType, node);
+
+        if (structType.IsValueType)
+        {
+            var aggregate = node.Target.Accept(this);
+            return _builder.BuildExtractValue(aggregate, (uint)field.OrdinalPosition, "field");
+        }
+
+        var pointer = node.Target.Accept(this);
+        var bodyType = _typeMapper.MapStructBody(structType);
+        var fieldPointer = _builder.BuildStructGEP2(bodyType, pointer, (uint)field.OrdinalPosition, "fieldptr");
+        return _builder.BuildLoad2(_typeMapper.Map(field.Type), fieldPointer, "field");
+    }
+
     // --- Not yet supported (later phases) -------------------------------------------------------------
 
     private static NotSupportedException NotYet(string node, string phase) =>
@@ -422,20 +554,19 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
 
     public LLVMValueRef VisitParameter(KokosParameterNode node) => throw NotYet(nameof(KokosParameterNode), "not visited directly by codegen — parameter types come from the checker's resolved KokosFunctionType");
     public LLVMValueRef VisitNamedType(KokosNamedTypeNode node) => throw NotYet(nameof(KokosNamedTypeNode), "type nodes aren't visited by codegen directly");
-    public LLVMValueRef VisitArrayType(KokosArrayTypeNode node) => throw NotYet(nameof(KokosArrayTypeNode), "Phase F");
-    public LLVMValueRef VisitFixedLengthArrayType(KokosFixedLengthArrayTypeNode node) => throw NotYet(nameof(KokosFixedLengthArrayTypeNode), "Phase F");
-    public LLVMValueRef VisitTerminatedArrayType(KokosTerminatedArrayTypeNode node) => throw NotYet(nameof(KokosTerminatedArrayTypeNode), "Phase F");
-    public LLVMValueRef VisitOptionalType(KokosOptionalTypeNode node) => throw NotYet(nameof(KokosOptionalTypeNode), "Phase F");
-    public LLVMValueRef VisitUnionType(KokosUnionTypeNode node) => throw NotYet(nameof(KokosUnionTypeNode), "Phase F");
-    public LLVMValueRef VisitTupleType(KokosTupleTypeNode node) => throw NotYet(nameof(KokosTupleTypeNode), "Phase F");
+    public LLVMValueRef VisitArrayType(KokosArrayTypeNode node) => throw NotYet(nameof(KokosArrayTypeNode), "type nodes aren't visited by codegen directly");
+    public LLVMValueRef VisitFixedLengthArrayType(KokosFixedLengthArrayTypeNode node) => throw NotYet(nameof(KokosFixedLengthArrayTypeNode), "type nodes aren't visited by codegen directly");
+    public LLVMValueRef VisitTerminatedArrayType(KokosTerminatedArrayTypeNode node) => throw NotYet(nameof(KokosTerminatedArrayTypeNode), "type nodes aren't visited by codegen directly");
+    public LLVMValueRef VisitOptionalType(KokosOptionalTypeNode node) => throw NotYet(nameof(KokosOptionalTypeNode), "type nodes aren't visited by codegen directly");
+    public LLVMValueRef VisitUnionType(KokosUnionTypeNode node) => throw NotYet(nameof(KokosUnionTypeNode), "type nodes aren't visited by codegen directly");
+    public LLVMValueRef VisitTupleType(KokosTupleTypeNode node) => throw NotYet(nameof(KokosTupleTypeNode), "type nodes aren't visited by codegen directly");
     public LLVMValueRef VisitModifiedType(KokosModifiedTypeNode node) => throw NotYet(nameof(KokosModifiedTypeNode), "type nodes aren't visited by codegen directly");
     public LLVMValueRef VisitTypeAlias(KokosTypeAliasNode node) => throw NotYet(nameof(KokosTypeAliasNode), "declarations aren't codegen'd directly, only referenced through resolved types");
-    public LLVMValueRef VisitEnumDecl(KokosEnumDeclNode node) => throw NotYet(nameof(KokosEnumDeclNode), "Phase F");
-    public LLVMValueRef VisitEnumVariant(KokosEnumVariantNode node) => throw NotYet(nameof(KokosEnumVariantNode), "Phase F");
-    public LLVMValueRef VisitStructDecl(KokosStructDeclNode node) => throw NotYet(nameof(KokosStructDeclNode), "Phase F");
-    public LLVMValueRef VisitField(KokosFieldNode node) => throw NotYet(nameof(KokosFieldNode), "Phase F");
-    public LLVMValueRef VisitLiteralString(KokosLiteralStringNode node) => throw NotYet(nameof(KokosLiteralStringNode), "needs a string runtime representation, Phase F");
-    public LLVMValueRef VisitMemberAccess(KokosMemberAccessNode node) => throw NotYet(nameof(KokosMemberAccessNode), "needs struct codegen, Phase F");
-    public LLVMValueRef VisitDestroyedExpression(KokosDestroyedExpressionNode node) => throw NotYet(nameof(KokosDestroyedExpressionNode), "Phase F — needs generational-reference runtime support");
-    public LLVMValueRef VisitFreeStatement(KokosFreeStatementNode node) => throw NotYet(nameof(KokosFreeStatementNode), "Phase F — needs generational-reference runtime support");
+    public LLVMValueRef VisitEnumDecl(KokosEnumDeclNode node) => throw NotYet(nameof(KokosEnumDeclNode), "declarations aren't codegen'd directly, only referenced through resolved types — and enums still need a chosen representation regardless");
+    public LLVMValueRef VisitEnumVariant(KokosEnumVariantNode node) => throw NotYet(nameof(KokosEnumVariantNode), "has no standalone codegen; only meaningful as part of resolving its enum");
+    public LLVMValueRef VisitStructDecl(KokosStructDeclNode node) => throw NotYet(nameof(KokosStructDeclNode), "declarations aren't codegen'd directly, only referenced through resolved types");
+    public LLVMValueRef VisitField(KokosFieldNode node) => throw NotYet(nameof(KokosFieldNode), "has no standalone codegen; only meaningful as part of resolving its struct/tuple");
+    public LLVMValueRef VisitLiteralString(KokosLiteralStringNode node) => throw NotYet(nameof(KokosLiteralStringNode), "needs a chosen string runtime representation");
+    public LLVMValueRef VisitDestroyedExpression(KokosDestroyedExpressionNode node) => throw NotYet(nameof(KokosDestroyedExpressionNode), "needs generational-reference runtime support");
+    public LLVMValueRef VisitFreeStatement(KokosFreeStatementNode node) => throw NotYet(nameof(KokosFreeStatementNode), "needs generational-reference runtime support");
 }

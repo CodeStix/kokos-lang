@@ -14,7 +14,9 @@ namespace Kokos.CodeGen.Tests;
 /// </summary>
 // Marshal.GetDelegateForFunctionPointer rejects generic delegate types (even closed ones like
 // Func<long, long, long>) — it needs a concrete, non-generic delegate type per signature.
+public delegate long NullaryLongFunc();
 public delegate long UnaryLongFunc(long a);
+public delegate long UnaryPointerToLongFunc(nint pointer);
 public delegate long BinaryLongFunc(long a, long b);
 public delegate long TernaryLongFunc(long a, long b, long c);
 public delegate sbyte BinarySByteFunc(sbyte a, sbyte b);
@@ -198,5 +200,172 @@ public class CodeGenTests
 
         Assert.Equal(10, pick(1, 10, 20));
         Assert.Equal(20, pick(0, 10, 20));
+    }
+
+    // --- Phase F: struct codegen ---------------------------------------------------------------
+
+    [Fact]
+    public void Constructing_a_reference_struct_and_reading_a_field_back_works()
+    {
+        using var jit = GenerateAndJit(
+            """
+            struct Point { x: Int, y: Int }
+
+            function makeX(): Int {
+                let p = Point(x: 10, y: 20);
+                return p.x;
+            }
+            """);
+
+        var makeX = jit.GetFunction<NullaryLongFunc>("makeX");
+
+        Assert.Equal(10, makeX());
+    }
+
+    [Fact]
+    public void Mutating_a_reference_struct_field_through_assignment_is_visible_on_read()
+    {
+        using var jit = GenerateAndJit(
+            """
+            struct Point { x: Int, y: Int }
+
+            function moveAndReadX(): Int {
+                let p = Point(x: 10, y: 20);
+                p.x = 99;
+                return p.x;
+            }
+            """);
+
+        var moveAndReadX = jit.GetFunction<NullaryLongFunc>("moveAndReadX");
+
+        Assert.Equal(99, moveAndReadX());
+    }
+
+    [Fact]
+    public void Value_struct_passed_by_value_is_copied_not_aliased()
+    {
+        using var jit = GenerateAndJit(
+            """
+            value struct Point { x: Int, y: Int }
+
+            function mutateCopy(p: Point): Int {
+                p.x = 999;
+                return p.x;
+            }
+
+            function f(): Int {
+                let original = Point(x: 10, y: 20);
+                mutateCopy(original);
+                return original.x;
+            }
+            """);
+
+        var f = jit.GetFunction<NullaryLongFunc>("f");
+
+        // The callee's mutation of its own copy must not leak back into the caller's original.
+        Assert.Equal(10, f());
+    }
+
+    [Fact]
+    public void Self_referential_struct_type_generates_and_links_without_infinite_recursion()
+    {
+        // A genuinely cyclic/linked VALUE (e.g. a real linked list) needs a nullable "terminator"
+        // field (`next: unowned Node?`) to bootstrap — every field is mandatory at construction, so
+        // there's no way to construct the first node of a chain without one, and optionals aren't
+        // codegen'd yet (out of scope this phase). This instead proves the self-referential STRUCT
+        // TYPE itself — the type mapper's shell-then-fill pattern — resolves and generates valid,
+        // linkable IR when used purely as a field/parameter type.
+        using var jit = GenerateAndJit(
+            """
+            struct Node { data: Int, next: Node }
+
+            function readValue(n: Node): Int {
+                return n.data;
+            }
+            """);
+
+        // Resolving the symbol (without calling it — there's no valid Node pointer to pass from
+        // .NET, per the scope note on struct/delegate boundaries) proves the function actually
+        // linked successfully.
+        jit.GetFunction<UnaryPointerToLongFunc>("readValue");
+    }
+
+    [Fact]
+    public void Tuple_shaped_struct_with_unnamed_fields_constructs_and_accesses_by_position()
+    {
+        // A genuine `type Pair = (Int, Int);` alias can't be used as a construction-call callee —
+        // that's a pre-existing gap in the checker (construction calls only resolve `struct`
+        // declarations, not tuple type aliases), unrelated to codegen and out of scope here. A named
+        // struct declaration with unnamed, positionally-accessed fields still exercises the same
+        // codegen path a bare tuple type would (KokosStructType with unnamed fields), just reached
+        // through a name.
+        using var jit = GenerateAndJit(
+            """
+            struct Pair { Int, Int }
+
+            function f(): Int {
+                let p = Pair(10, 20);
+                return p.0 + p.1;
+            }
+            """);
+
+        var f = jit.GetFunction<NullaryLongFunc>("f");
+
+        Assert.Equal(30, f());
+    }
+
+    [Fact]
+    public void ChooseOldest_with_real_structs_picks_the_correct_person_for_both_orderings()
+    {
+        using var jit = GenerateAndJit(
+            """
+            struct Person { age: Int }
+
+            function chooseOldest(a: owned Person, b: owned Person): owned Person {
+                if a.age > b.age {
+                    return a;
+                } else {
+                    return b;
+                }
+            }
+
+            function pickAge(ageA: Int, ageB: Int): Int {
+                let a = Person(age: ageA);
+                let b = Person(age: ageB);
+                return chooseOldest(a, b).age;
+            }
+            """);
+
+        var pickAge = jit.GetFunction<BinaryLongFunc>("pickAge");
+
+        Assert.Equal(30, pickAge(30, 20));
+        Assert.Equal(30, pickAge(20, 30));
+    }
+
+    [Fact]
+    public void SwapFavorite_with_real_structs_swaps_the_ages_between_families()
+    {
+        using var jit = GenerateAndJit(
+            """
+            struct Person { age: Int }
+            struct Family { favoritePerson: owned Person }
+
+            function swapFavorite(a: unowned Family, b: unowned Family) {
+                let temp = a.favoritePerson;
+                a.favoritePerson = b.favoritePerson;
+                b.favoritePerson = temp;
+            }
+
+            function swapAndReadA(ageA: Int, ageB: Int): Int {
+                let a = Family(favoritePerson: Person(age: ageA));
+                let b = Family(favoritePerson: Person(age: ageB));
+                swapFavorite(a, b);
+                return a.favoritePerson.age;
+            }
+            """);
+
+        var swapAndReadA = jit.GetFunction<BinaryLongFunc>("swapAndReadA");
+
+        Assert.Equal(20, swapAndReadA(10, 20));
     }
 }
