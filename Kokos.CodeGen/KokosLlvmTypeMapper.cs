@@ -8,11 +8,13 @@ namespace Kokos.CodeGen;
 /// the *only* place this decision lives, so retargeting word size or adding a new primitive kind
 /// stays a one-file change.
 ///
-/// Enums/arrays/optionals/unions still have no chosen representation, so mapping them is left
-/// unimplemented here rather than guessed at now. Structs (and tuples, which the semantic layer
-/// already models as a <see cref="KokosStructType"/> with a null <see cref="KokosStructType.Name"/>)
-/// are real as of Phase F. As of Phase G, a reference struct's representation also depends on
-/// *ownership*, not just its structural type — see <see cref="Map(KokosType, KokosOwnershipKind)"/>.
+/// Enums/optionals/unions still have no chosen representation, so mapping them is left unimplemented
+/// here rather than guessed at now. Structs (and tuples, which the semantic layer already models as a
+/// <see cref="KokosStructType"/> with a null <see cref="KokosStructType.Name"/>) are real as of Phase
+/// F. As of Phase G, a reference struct's representation also depends on *ownership*, not just its
+/// structural type — see <see cref="Map(KokosType, KokosOwnershipKind)"/>. As of the C-interop phase,
+/// arrays are real too, but only as an opaque `unmanaged` pointer — no Kokos-side construction,
+/// indexing, or length yet.
 /// </summary>
 public sealed class KokosLlvmTypeMapper
 {
@@ -45,10 +47,22 @@ public sealed class KokosLlvmTypeMapper
 
         KokosStructType { IsValueType: true } valueStructType => MapStructBody(valueStructType),
 
+        // `unmanaged` is a bare pointer straight at the *body* layout — no generation prefix, unlike
+        // every other reference kind below. This is "the generation field stripped off": the exact
+        // bytes a C struct of the same fields would occupy.
+        KokosStructType referenceStructType when ownership == KokosOwnershipKind.Unmanaged =>
+            LLVMTypeRef.CreatePointer(MapStructBody(referenceStructType), 0),
+
         KokosStructType referenceStructType when ownership is KokosOwnershipKind.Unowned or KokosOwnershipKind.Manual =>
             _context.GetStructType([LLVMTypeRef.CreatePointer(MapEnvelope(referenceStructType), 0), _context.Int64Type], Packed: false),
 
         KokosStructType referenceStructType => LLVMTypeRef.CreatePointer(MapEnvelope(referenceStructType), 0),
+
+        // Every array flavor (dynamic/fixed/terminated) is carried as a raw pointer to its element
+        // type, per spec — the checker already guarantees any array-typed position reaching codegen is
+        // `unmanaged` (arrays have no generation-tracked representation yet, a separate future phase),
+        // so `ownership` doesn't need to be consulted here at all.
+        KokosArrayType arrayType => LLVMTypeRef.CreatePointer(Map(arrayType.ElementType), 0),
 
         _ => throw new NotSupportedException(
             $"{type.GetType().Name} ('{type.DisplayName}') has no LLVM representation yet — " +

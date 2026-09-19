@@ -1,79 +1,125 @@
-using Kokos.Compiler.Formatting;
+using Kokos.CodeGen;
 using Kokos.Compiler.Parsing;
 using Kokos.Compiler.Semantics;
-using Kokos.Compiler.Syntax;
 
 namespace Kokos;
 
 internal class Program
 {
-    private const string ExampleSource = """
-
-        type String = [Int8];
-        type Object = String;
-
-        function exampleFunc(args: [String], num: Int): Object {
-                let exampleVar = args.join(".oof");
-
-            return exampleVar + num.toString();
-        }
-        """;
-
-    static void Main(string[] args)
+    static int Main(string[] args)
     {
-        var source = args.Length > 0 ? File.ReadAllText(args[0]) : ExampleSource;
+        if (args.Length < 1)
+        {
+            Console.Error.WriteLine("Usage: kokos <file.kokos>");
+            return 1;
+        }
+
+        var path = args[0];
+        var source = File.ReadAllText(path);
 
         var unit = KokosParser.Parse(source, out var diagnostics);
 
-        var declarationTable = new KokosDeclarationTable(unit, diagnostics);
-        KokosTypeChecker.Check(unit, declarationTable, diagnostics);
-
-        Console.WriteLine("=== AST ===");
-        DumpNode(unit, 0);
+        var table = new KokosDeclarationTable(unit, diagnostics);
+        var resolver = new KokosTypeResolver(table, diagnostics);
+        var checker = new KokosTypeChecker(table, resolver, diagnostics);
+        checker.VisitCompilationUnit(unit);
 
         if (diagnostics.Any())
         {
-            Console.WriteLine();
             Console.WriteLine("=== Diagnostics ===");
             foreach (var diagnostic in diagnostics)
                 Console.WriteLine(diagnostic);
+            Console.WriteLine();
         }
 
-        var roundTripped = unit.GetFullText();
-        var matches = roundTripped == source;
-
-        Console.WriteLine();
-        Console.WriteLine($"=== Round-trip {(matches ? "OK" : "MISMATCH")} === check");
-        if (!matches)
+        if (diagnostics.HasErrors)
         {
-            Console.WriteLine("--- original ---");
-            Console.WriteLine(source);
-            Console.WriteLine("--- reconstructed ---");
-            Console.WriteLine(roundTripped);
+            Console.Error.WriteLine("Compilation failed.");
+            return 1;
         }
 
-        Console.WriteLine();
-        Console.WriteLine("=== Formatted ===");
-        Console.Write(KokosFormatter.Format(unit));
+        var mainEntry = checker.FunctionTypes.FirstOrDefault(entry => entry.Key.Name == "main");
+        if (mainEntry.Key is null)
+        {
+            Console.Error.WriteLine("No 'main' function found — nothing to run.");
+            return 1;
+        }
+
+        if (mainEntry.Value.ParameterTypes.Count > 0)
+        {
+            Console.Error.WriteLine("'main' must take no parameters.");
+            return 1;
+        }
+
+        try
+        {
+            var generator = new KokosCodeGenerator(table, checker, Path.GetFileNameWithoutExtension(path));
+            var module = generator.Generate(unit);
+
+            Console.WriteLine("=== LLVM IR ===");
+            Console.WriteLine(module.PrintToString());
+
+            using var jit = KokosJit.Create(module, generator.Context);
+
+            Console.WriteLine("=== Running ===");
+            RunMain(jit, mainEntry.Value.ReturnType);
+        }
+        catch (Exception ex) when (ex is NotSupportedException or InvalidOperationException)
+        {
+            Console.Error.WriteLine($"Failed to compile or run: {ex.Message}");
+            return 1;
+        }
+
+        return 0;
     }
 
-    private static void DumpNode(KokosSyntaxElement element, int depth)
+    private static void RunMain(KokosJit jit, KokosType returnType)
     {
-        var indent = new string(' ', depth * 2);
-
-        switch (element)
+        switch (returnType)
         {
-            case KokosToken { IsMissing: true } token:
-                Console.WriteLine($"{indent}<missing {token.Kind}>");
+            case KokosUnknownType:
+                jit.GetFunction<Action>("main")();
                 break;
-            case KokosToken token:
-                Console.WriteLine($"{indent}{token.Kind} '{token.Text}'");
+
+            case KokosBoolType:
+                Console.WriteLine(jit.GetFunction<NullaryBoolFunc>("main")());
                 break;
-            case KokosNode node:
-                Console.WriteLine($"{indent}{node.GetType().Name}");
-                foreach (var child in node.Children)
-                    DumpNode(child, depth + 1);
+
+            case KokosPrimitiveType primitive:
+                Console.WriteLine(RunPrimitiveMain(jit, primitive.Kind));
                 break;
+
+            default:
+                throw new NotSupportedException($"'main' returning {returnType.DisplayName} isn't supported yet.");
         }
     }
+
+    // Marshal.GetDelegateForFunctionPointer rejects generic delegate types (Func<T>/Action<T>), so
+    // every shape 'main' can return needs its own concrete, non-generic delegate here.
+    private static object RunPrimitiveMain(KokosJit jit, KokosPrimitiveKind kind) => kind switch
+    {
+        KokosPrimitiveKind.Int or KokosPrimitiveKind.Int64 => jit.GetFunction<NullaryLongFunc>("main")(),
+        KokosPrimitiveKind.UInt or KokosPrimitiveKind.UInt64 => jit.GetFunction<NullaryULongFunc>("main")(),
+        KokosPrimitiveKind.Int32 => jit.GetFunction<NullaryIntFunc>("main")(),
+        KokosPrimitiveKind.UInt32 => jit.GetFunction<NullaryUIntFunc>("main")(),
+        KokosPrimitiveKind.Int16 => jit.GetFunction<NullaryShortFunc>("main")(),
+        KokosPrimitiveKind.UInt16 => jit.GetFunction<NullaryUShortFunc>("main")(),
+        KokosPrimitiveKind.Int8 => jit.GetFunction<NullarySByteFunc>("main")(),
+        KokosPrimitiveKind.UInt8 => jit.GetFunction<NullaryByteFunc>("main")(),
+        KokosPrimitiveKind.Float or KokosPrimitiveKind.Float64 => jit.GetFunction<NullaryDoubleFunc>("main")(),
+        KokosPrimitiveKind.Float32 => jit.GetFunction<NullaryFloatFunc>("main")(),
+        _ => throw new ArgumentOutOfRangeException(nameof(kind)),
+    };
+
+    private delegate bool NullaryBoolFunc();
+    private delegate long NullaryLongFunc();
+    private delegate ulong NullaryULongFunc();
+    private delegate int NullaryIntFunc();
+    private delegate uint NullaryUIntFunc();
+    private delegate short NullaryShortFunc();
+    private delegate ushort NullaryUShortFunc();
+    private delegate sbyte NullarySByteFunc();
+    private delegate byte NullaryByteFunc();
+    private delegate double NullaryDoubleFunc();
+    private delegate float NullaryFloatFunc();
 }

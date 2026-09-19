@@ -168,6 +168,16 @@ public sealed class KokosTypeResolver : IKokosVisitor<KokosType>
             var fieldNode = fieldNodes[i];
             var type = Resolve(fieldNode.Type);
             var ownership = KokosModifierMapper.OwnershipOf(fieldNode.Type, type, KokosOwnershipKind.Owned);
+
+            // VisitModifiedType already rejects the wrong *explicit* modifier on an array; this catches
+            // the remaining case — no modifier at all, silently defaulting to `Owned`, which has no
+            // representation for an array.
+            if (type is KokosArrayType && ownership != KokosOwnershipKind.Unmanaged)
+            {
+                _diagnostics.ReportError(fieldNode.Type.GetTokens().First().Span,
+                    "Arrays are only supported as 'unmanaged' in this phase; annotate this field with 'unmanaged'.");
+            }
+
             fields.Add(new KokosStructField(fieldNode.Name, fieldNode.IndexToken is not null, i, type, ownership));
         }
 
@@ -248,6 +258,16 @@ public sealed class KokosTypeResolver : IKokosVisitor<KokosType>
             _diagnostics.ReportError(node.ModifierToken.Span,
                 $"'{node.ModifierToken.Text}' can only modify a type that requires a pointer to be passed " +
                 $"around, but '{innerType.DisplayName}' is a value type.");
+        }
+
+        // Arrays have no generation-tracked representation yet (a separate future phase) — the only
+        // pointer they can be is a bare, untracked one, so `owned`/`unowned`/`manual` on an array type
+        // is rejected here rather than silently producing something codegen has no shape for.
+        if (innerType is KokosArrayType && node.ModifierToken.Kind != TokenKind.UnmanagedKeyword)
+        {
+            _diagnostics.ReportError(node.ModifierToken.Span,
+                $"'{node.ModifierToken.Text}' cannot modify an array type; arrays are only supported as " +
+                $"'unmanaged' in this phase.");
         }
 
         return innerType;

@@ -213,13 +213,15 @@ public class TypeResolverTests
     [Fact]
     public void Modifier_composes_with_an_array_optional_and_fixed_length_array_without_diagnostics()
     {
+        // Arrays only support the 'unmanaged' modifier (no generation-tracked representation exists
+        // for them yet) — 'unowned Person?' proves composition with a non-array optional still works.
         var (unit, _, resolver, diagnostics) = Setup(
             """
             struct Person { age: Int }
             struct Holder {
-                a: owned [Person],
+                a: unmanaged [Person],
                 b: unowned Person?,
-                c: manual length(100) [Int8]
+                c: unmanaged length(100) [Int8]
             }
             """);
         resolver.ResolveStruct((KokosStructDeclNode)unit.Members[1]);

@@ -5,13 +5,20 @@ namespace Kokos.Compiler.Semantics;
 
 /// <summary>
 /// The three ownership modifiers from the memory-model spec, plus <see cref="Inferred"/> for a
-/// binding with no explicit annotation and no computed default either. Parameters and struct fields
-/// get a real positional default the moment they're pointer-shaped (see
+/// binding with no explicit annotation and no computed default either, and <see cref="Unmanaged"/> —
+/// the C-interop escape hatch added in the phase that added <c>import</c>/<c>export</c> functions.
+/// Parameters and struct fields get a real positional default the moment they're pointer-shaped (see
 /// <see cref="KokosModifierMapper"/>); an unannotated pointer-shaped local defaults to
 /// <see cref="Owned"/> too, on the simplifying assumption that every owned value is heap-allocated
 /// (the real stack-vs-heap escape-analysis optimization is a deferred, later phase — it would only
 /// ever change *where* an owned value lives, never whether it's owned). <see cref="Inferred"/> only
 /// actually occurs for a value-shaped binding, where ownership is meaningless.
+///
+/// <see cref="Unmanaged"/> is different from the other three in one important way: it is never a
+/// default. A bare pointer with no generation and no tracking is only ever produced by writing
+/// <c>unmanaged</c> explicitly — it has no `free()`/`destroyed()` support, and converting one back
+/// into a tracked `owned`/`unowned`/`manual` reference is a compile error (there's no generation to
+/// adopt for a pointer that came from outside Kokos's own allocator).
 /// </summary>
 public enum KokosOwnershipKind
 {
@@ -19,6 +26,7 @@ public enum KokosOwnershipKind
     Owned,
     Unowned,
     Manual,
+    Unmanaged,
 }
 
 /// <summary>Shared by <see cref="KokosTypeResolver"/> (struct/tuple fields) and <see cref="KokosTypeChecker"/> (parameters/locals) so the token-to-enum mapping and default-computation logic exist in exactly one place.</summary>
@@ -64,6 +72,7 @@ internal static class KokosModifierMapper
         TokenKind.OwnedKeyword => KokosOwnershipKind.Owned,
         TokenKind.UnownedKeyword => KokosOwnershipKind.Unowned,
         TokenKind.ManualKeyword => KokosOwnershipKind.Manual,
+        TokenKind.UnmanagedKeyword => KokosOwnershipKind.Unmanaged,
         _ => KokosOwnershipKind.Inferred,
     };
 }

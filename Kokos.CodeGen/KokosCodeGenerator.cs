@@ -158,8 +158,14 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         foreach (var function in functions)
             DeclareFunction(function);
 
+        // An `import function` has no body — DeclareFunction alone already produces a correct extern
+        // declaration for it (the same shape as the hand-declared malloc/free/abort), and KokosJit's
+        // process-symbol generator resolves it against the host process at JIT time.
         foreach (var function in functions)
-            DefineFunctionBody(function);
+        {
+            if (function.Body is not null)
+                DefineFunctionBody(function);
+        }
 
         return default;
     }
@@ -170,8 +176,10 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         return _module.AddFunction(node.Name, llvmFunctionType);
     }
 
+    /// <summary>Only ever called for a function with a real body (an `import function` is declared, never defined) — see <see cref="VisitCompilationUnit"/>.</summary>
     private void DefineFunctionBody(KokosFunctionNode node)
     {
+        var body = node.Body ?? throw new InvalidOperationException($"'{node.Name}' has no body to define — this is an import-only declaration.");
         var function = _module.GetNamedFunction(node.Name);
         var functionType = _checker.FunctionTypes[node];
 
@@ -198,7 +206,7 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
                 _scope[parameter.Name] = (alloca, llvmParamType, ownership, kokosType);
             }
 
-            node.Body.Accept(this);
+            body.Accept(this);
 
             // A function with no declared return type and no return-with-a-value anywhere in its
             // body (checked as legitimately void-like by KokosTypeChecker) is allowed to simply fall
@@ -226,7 +234,8 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         // The real driver is VisitCompilationUnit's two-pass declare/define above; this exists only
         // to satisfy the interface for a function visited in isolation (e.g. a direct test call).
         DeclareFunction(node);
-        DefineFunctionBody(node);
+        if (node.Body is not null)
+            DefineFunctionBody(node);
         return _module.GetNamedFunction(node.Name);
     }
 
@@ -482,14 +491,9 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
 
             if (targetType is KokosStructType referenceStructType)
             {
-                var envelopeType = _typeMapper.MapEnvelope(referenceStructType);
                 var baseOwnership = GetOwnership(access.Target);
                 var baseValue = access.Target.Accept(this);
-                var envelopePointer = baseOwnership == KokosOwnershipKind.Owned
-                    ? baseValue
-                    : CheckGenerationOrTrap(baseValue, envelopeType, "deref");
-
-                var bodyPointer = GetBody(envelopePointer, envelopeType);
+                var bodyPointer = ResolveBodyPointer(baseValue, baseOwnership, referenceStructType);
                 var field = FindField(referenceStructType, access);
                 var converted = ConvertOwnership(value, sourceOwnership, field.Ownership, field.Type);
                 var fieldPointer = _builder.BuildStructGEP2(_typeMapper.MapStructBody(referenceStructType), bodyPointer, (uint)field.OrdinalPosition, "fieldptr");
@@ -535,17 +539,26 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
 
     /// <summary>
     /// Converts a value from its source ownership's LLVM shape to a target position's expected shape.
-    /// The only real case is `owned` (bare envelope pointer) -> `unowned`/`manual` (reference pair): a
-    /// reborrow reads the *allocation's current* generation and packages it with the pointer.
-    /// `unowned`/`manual` -> `unowned`/`manual` and `owned` -> `owned` both pass the value through
-    /// completely unchanged — re-capturing a "fresh" generation on an already-non-owned pass would
-    /// silently defeat exactly the staleness detection a longer-lived reference exists to catch.
-    /// <paramref name="type"/> only needs to be a real <see cref="KokosStructType"/> when a reborrow
-    /// actually happens (guaranteed by <paramref name="to"/> being `Unowned`/`Manual`, which per the
-    /// placement-validation rules from Phase D can only ever apply to a pointer-shaped type).
+    /// Two real cases: `owned` (bare envelope pointer) -> `unowned`/`manual` (reference pair) is a
+    /// reborrow, reading the *allocation's current* generation and packaging it with the pointer;
+    /// `owned`/`unowned`/`manual` -> `unmanaged` strips the generation entirely, landing on a bare
+    /// pointer at the struct's body (see <see cref="StripGeneration"/>) — the C-interop conversion.
+    /// Every other pairing (including `unmanaged` -> `unmanaged`, and same-kind -> same-kind) passes
+    /// the value through completely unchanged — re-capturing a "fresh" generation on an already-
+    /// non-owned pass would silently defeat exactly the staleness detection a longer-lived reference
+    /// exists to catch. `unmanaged` -> a tracked kind never reaches here: the checker statically
+    /// rejects it, since Kokos can never re-establish a generation for a foreign pointer.
+    /// <paramref name="type"/> only needs to be a real <see cref="KokosStructType"/> when a reborrow or
+    /// a strip actually happens — for a reborrow that's guaranteed by <paramref name="to"/> being
+    /// `Unowned`/`Manual` (per the placement-validation rules from Phase D, only ever a pointer-shaped
+    /// type); for a strip, an array position is always already `unmanaged` on both sides (never taking
+    /// this branch at all), so `from != Unmanaged` here can only mean a struct.
     /// </summary>
     private LLVMValueRef ConvertOwnership(LLVMValueRef value, KokosOwnershipKind from, KokosOwnershipKind to, KokosType type)
     {
+        if (to == KokosOwnershipKind.Unmanaged && from != KokosOwnershipKind.Unmanaged)
+            return StripGeneration(value, from, (KokosStructType)type);
+
         if (from != KokosOwnershipKind.Owned || to is not (KokosOwnershipKind.Unowned or KokosOwnershipKind.Manual))
             return value;
 
@@ -557,6 +570,20 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         return _builder.BuildInsertValue(pair, generation, 1, "reborrow");
     }
 
+    /// <summary>
+    /// The C-interop conversion: given an `owned` (bare envelope pointer) or `unowned`/`manual`
+    /// (reference pair) value, produces a bare pointer straight at the struct's body — the same bytes
+    /// a C struct of the same fields would occupy, with the generation prefix (and, for a pair, the
+    /// captured generation alongside it) simply dropped on the floor. There is deliberately no
+    /// generation check here: `unmanaged` is the explicit "trust me, this is safe" escape hatch.
+    /// </summary>
+    private LLVMValueRef StripGeneration(LLVMValueRef value, KokosOwnershipKind from, KokosStructType structType)
+    {
+        var envelopeType = _typeMapper.MapEnvelope(structType);
+        var envelopePointer = from == KokosOwnershipKind.Owned ? value : ExtractPointer(value);
+        return GetBody(envelopePointer, envelopeType);
+    }
+
     /// <summary>The payload half of an envelope (index 1 — index 0 is the generation), given a bare envelope pointer.</summary>
     private LLVMValueRef GetBody(LLVMValueRef envelopePointer, LLVMTypeRef envelopeType) =>
         _builder.BuildStructGEP2(envelopeType, envelopePointer, 1, "body");
@@ -566,6 +593,24 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     {
         var generationPointer = _builder.BuildStructGEP2(envelopeType, envelopePointer, 0, "genptr");
         return _builder.BuildLoad2(Context.Int64Type, generationPointer, "gen");
+    }
+
+    /// <summary>
+    /// Resolves a struct-typed value down to a pointer at its field-body layout, regardless of
+    /// ownership: `owned`/`unowned`/`manual` all point at the *envelope* (generation + body) and need
+    /// <see cref="GetBody"/> (plus, for `unowned`/`manual`, a generation check first via
+    /// <see cref="CheckGenerationOrTrap"/>); `unmanaged` already points directly at the body — it was
+    /// never wrapped in an envelope in the first place (a foreign C pointer has no generation to
+    /// check), so it passes through unchanged. Shared by every field dereference (read or write).
+    /// </summary>
+    private LLVMValueRef ResolveBodyPointer(LLVMValueRef value, KokosOwnershipKind ownership, KokosStructType structType)
+    {
+        if (ownership == KokosOwnershipKind.Unmanaged)
+            return value;
+
+        var envelopeType = _typeMapper.MapEnvelope(structType);
+        var envelopePointer = ownership == KokosOwnershipKind.Owned ? value : CheckGenerationOrTrap(value, envelopeType, "deref");
+        return GetBody(envelopePointer, envelopeType);
     }
 
     private LLVMValueRef ExtractPointer(LLVMValueRef referencePair) => _builder.BuildExtractValue(referencePair, 0, "ptr");
@@ -762,15 +807,11 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
 
         // An `owned` reference dereferences unchecked (compiler-proven valid, per spec); an
         // `unowned`/`manual` reference is a {pointer, capturedGeneration} pair that must pass the
-        // generation check before every dereference — a mismatch traps.
-        var envelopeType = _typeMapper.MapEnvelope(structType);
+        // generation check before every dereference — a mismatch traps. An `unmanaged` reference is
+        // already a bare pointer at the body — see ResolveBodyPointer.
         var targetOwnership = GetOwnership(node.Target);
         var targetValue = node.Target.Accept(this);
-        var envelopePointer = targetOwnership == KokosOwnershipKind.Owned
-            ? targetValue
-            : CheckGenerationOrTrap(targetValue, envelopeType, "deref");
-
-        var bodyPointer = GetBody(envelopePointer, envelopeType);
+        var bodyPointer = ResolveBodyPointer(targetValue, targetOwnership, structType);
         var fieldPointer = _builder.BuildStructGEP2(_typeMapper.MapStructBody(structType), bodyPointer, (uint)field.OrdinalPosition, "fieldptr");
         return _builder.BuildLoad2(_typeMapper.Map(field.Type, field.Ownership), fieldPointer, "field");
     }

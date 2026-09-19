@@ -34,8 +34,11 @@ public sealed class KokosTokenizer
         ["owned"] = TokenKind.OwnedKeyword,
         ["unowned"] = TokenKind.UnownedKeyword,
         ["manual"] = TokenKind.ManualKeyword,
+        ["unmanaged"] = TokenKind.UnmanagedKeyword,
         ["destroyed"] = TokenKind.DestroyedKeyword,
         ["free"] = TokenKind.FreeKeyword,
+        ["import"] = TokenKind.ImportKeyword,
+        ["export"] = TokenKind.ExportKeyword,
     };
 
     private readonly string _source;

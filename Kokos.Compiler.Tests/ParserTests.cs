@@ -52,7 +52,7 @@ public class ParserTests
     public void Parses_var_decl_with_chained_member_call()
     {
         var unit = KokosParser.Parse(ExampleSource, out _);
-        var body = unit.Functions[0].Body;
+        var body = unit.Functions[0].Body!;
 
         var varDecl = Assert.IsType<KokosVarDeclNode>(body.Statements[0]);
         Assert.Equal("exampleVar", varDecl.Name);
@@ -72,7 +72,7 @@ public class ParserTests
     public void Parses_return_with_binary_plus_over_member_calls()
     {
         var unit = KokosParser.Parse(ExampleSource, out _);
-        var body = unit.Functions[0].Body;
+        var body = unit.Functions[0].Body!;
 
         var returnStatement = Assert.IsType<KokosReturnNode>(body.Statements[1]);
         var binary = Assert.IsType<KokosMathOperatorNode>(returnStatement.Expression);
@@ -92,7 +92,7 @@ public class ParserTests
         var unit = KokosParser.Parse("function f(): Int { return 1 + 2 * 3; }", out var diagnostics);
         Assert.False(diagnostics.HasErrors);
 
-        var returnStatement = Assert.IsType<KokosReturnNode>(unit.Functions[0].Body.Statements[0]);
+        var returnStatement = Assert.IsType<KokosReturnNode>(unit.Functions[0].Body!.Statements[0]);
         var addition = Assert.IsType<KokosMathOperatorNode>(returnStatement.Expression);
         Assert.Equal("+", addition.OperatorToken.Text);
 
@@ -107,7 +107,7 @@ public class ParserTests
         var unit = KokosParser.Parse("function f(): Int { x = 1; return x; }", out var diagnostics);
         Assert.False(diagnostics.HasErrors);
 
-        var statement = Assert.IsType<KokosExpressionStatementNode>(unit.Functions[0].Body.Statements[0]);
+        var statement = Assert.IsType<KokosExpressionStatementNode>(unit.Functions[0].Body!.Statements[0]);
         var assignment = Assert.IsType<KokosAssignmentNode>(statement.Expression);
         Assert.IsType<KokosIdentifierNode>(assignment.Target);
         Assert.IsType<KokosLiteralNumberNode>(assignment.Value);
@@ -288,7 +288,7 @@ public class ParserTests
         var unit = KokosParser.Parse("function f(v: Ip): Int8 { return v.0; }", out var diagnostics);
         Assert.False(diagnostics.HasErrors);
 
-        var returnStatement = Assert.IsType<KokosReturnNode>(unit.Functions[0].Body.Statements[0]);
+        var returnStatement = Assert.IsType<KokosReturnNode>(unit.Functions[0].Body!.Statements[0]);
         var access = Assert.IsType<KokosMemberAccessNode>(returnStatement.Expression);
         Assert.Equal("0", access.MemberName);
         Assert.Equal(TokenKind.NumberLiteral, access.NameToken.Kind);
@@ -302,7 +302,7 @@ public class ParserTests
             out var diagnostics);
         Assert.False(diagnostics.HasErrors);
 
-        var returnStatement = Assert.IsType<KokosReturnNode>(unit.Functions[0].Body.Statements[0]);
+        var returnStatement = Assert.IsType<KokosReturnNode>(unit.Functions[0].Body!.Statements[0]);
         var call = Assert.IsType<KokosCallNode>(returnStatement.Expression);
         Assert.Equal(3, call.Arguments.Items.Count);
 
@@ -326,7 +326,7 @@ public class ParserTests
             out var diagnostics);
         Assert.False(diagnostics.HasErrors);
 
-        var varDecl = Assert.IsType<KokosVarDeclNode>(unit.Functions[0].Body.Statements[0]);
+        var varDecl = Assert.IsType<KokosVarDeclNode>(unit.Functions[0].Body!.Statements[0]);
         Assert.NotNull(varDecl.Type);
         Assert.IsType<KokosArrayTypeNode>(varDecl.Type);
     }
@@ -366,7 +366,7 @@ public class ParserTests
             out var diagnostics);
         Assert.False(diagnostics.HasErrors);
 
-        var varDecl = Assert.IsType<KokosVarDeclNode>(unit.Functions[0].Body.Statements[0]);
+        var varDecl = Assert.IsType<KokosVarDeclNode>(unit.Functions[0].Body!.Statements[0]);
         Assert.Null(varDecl.Type);
     }
 
@@ -376,7 +376,7 @@ public class ParserTests
         var unit = KokosParser.Parse("function f(x: Int): Int { if x > 0 { return x; } return 0; }", out var diagnostics);
         Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
 
-        var ifStatement = Assert.IsType<KokosIfStatementNode>(unit.Functions[0].Body.Statements[0]);
+        var ifStatement = Assert.IsType<KokosIfStatementNode>(unit.Functions[0].Body!.Statements[0]);
         Assert.IsType<KokosMathOperatorNode>(ifStatement.Condition);
         Assert.Single(ifStatement.ThenBlock.Statements);
         Assert.Null(ifStatement.ElseKeyword);
@@ -391,7 +391,7 @@ public class ParserTests
             out var diagnostics);
         Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
 
-        var ifStatement = Assert.IsType<KokosIfStatementNode>(unit.Functions[0].Body.Statements[0]);
+        var ifStatement = Assert.IsType<KokosIfStatementNode>(unit.Functions[0].Body!.Statements[0]);
         Assert.NotNull(ifStatement.ElseKeyword);
         Assert.IsType<KokosBlockNode>(ifStatement.ElseBody);
     }
@@ -414,7 +414,7 @@ public class ParserTests
             out var diagnostics);
         Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
 
-        var outerIf = Assert.IsType<KokosIfStatementNode>(unit.Functions[0].Body.Statements[0]);
+        var outerIf = Assert.IsType<KokosIfStatementNode>(unit.Functions[0].Body!.Statements[0]);
         var elseIf = Assert.IsType<KokosIfStatementNode>(outerIf.ElseBody);
         Assert.IsType<KokosMathOperatorNode>(elseIf.Condition);
         Assert.IsType<KokosBlockNode>(elseIf.ElseBody);
@@ -436,7 +436,7 @@ public class ParserTests
         var unit = KokosParser.Parse(source, out var diagnostics);
         Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
 
-        var ifStatement = Assert.IsType<KokosIfStatementNode>(unit.Functions[0].Body.Statements[0]);
+        var ifStatement = Assert.IsType<KokosIfStatementNode>(unit.Functions[0].Body!.Statements[0]);
         var thenReturn = Assert.IsType<KokosReturnNode>(ifStatement.ThenBlock.Statements[0]);
         Assert.IsType<KokosIdentifierNode>(thenReturn.Expression);
     }
@@ -449,7 +449,7 @@ public class ParserTests
             out var diagnostics);
         Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
 
-        var whileStatement = Assert.IsType<KokosWhileStatementNode>(unit.Functions[0].Body.Statements[0]);
+        var whileStatement = Assert.IsType<KokosWhileStatementNode>(unit.Functions[0].Body!.Statements[0]);
         Assert.IsType<KokosMathOperatorNode>(whileStatement.Condition);
         Assert.Single(whileStatement.Body.Statements);
     }
@@ -462,7 +462,7 @@ public class ParserTests
             out var diagnostics);
         Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
 
-        var returnStatement = Assert.IsType<KokosReturnNode>(unit.Functions[0].Body.Statements[0]);
+        var returnStatement = Assert.IsType<KokosReturnNode>(unit.Functions[0].Body!.Statements[0]);
         var conditional = Assert.IsType<KokosConditionalExpressionNode>(returnStatement.Expression);
         Assert.IsType<KokosIdentifierNode>(conditional.Condition);
         Assert.IsType<KokosLiteralNumberNode>(conditional.TrueValue);
@@ -477,7 +477,7 @@ public class ParserTests
             out var diagnostics);
         Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
 
-        var returnStatement = Assert.IsType<KokosReturnNode>(unit.Functions[0].Body.Statements[0]);
+        var returnStatement = Assert.IsType<KokosReturnNode>(unit.Functions[0].Body!.Statements[0]);
         var conditional = Assert.IsType<KokosConditionalExpressionNode>(returnStatement.Expression);
         // "a || b" must have been consumed entirely as the condition (logical-or binds tighter).
         Assert.IsType<KokosMathOperatorNode>(conditional.Condition);
@@ -489,7 +489,7 @@ public class ParserTests
         var unit = KokosParser.Parse("function f(): Bool { return true; }", out var diagnostics);
         Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
 
-        var returnStatement = Assert.IsType<KokosReturnNode>(unit.Functions[0].Body.Statements[0]);
+        var returnStatement = Assert.IsType<KokosReturnNode>(unit.Functions[0].Body!.Statements[0]);
         var literal = Assert.IsType<KokosLiteralBoolNode>(returnStatement.Expression);
         Assert.True(literal.Value);
     }
@@ -500,7 +500,7 @@ public class ParserTests
         var unit = KokosParser.Parse("function f(flag: Bool): Bool { return !flag; }", out var diagnostics);
         Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
 
-        var returnStatement = Assert.IsType<KokosReturnNode>(unit.Functions[0].Body.Statements[0]);
+        var returnStatement = Assert.IsType<KokosReturnNode>(unit.Functions[0].Body!.Statements[0]);
         var unary = Assert.IsType<KokosUnaryOperatorNode>(returnStatement.Expression);
         Assert.Equal("!", unary.OperatorToken.Text);
     }
@@ -534,7 +534,7 @@ public class ParserTests
         var unit = KokosParser.Parse("function f() { let p: manual Person = 0; }", out var diagnostics);
         Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
 
-        var varDecl = Assert.IsType<KokosVarDeclNode>(unit.Functions[0].Body.Statements[0]);
+        var varDecl = Assert.IsType<KokosVarDeclNode>(unit.Functions[0].Body!.Statements[0]);
         var modified = Assert.IsType<KokosModifiedTypeNode>(varDecl.Type);
         Assert.Equal("manual", modified.ModifierToken.Text);
     }
@@ -588,7 +588,7 @@ public class ParserTests
             "function f(p: unowned Person): Bool { return destroyed(p); }", out var diagnostics);
         Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
 
-        var returnStatement = Assert.IsType<KokosReturnNode>(unit.Functions[0].Body.Statements[0]);
+        var returnStatement = Assert.IsType<KokosReturnNode>(unit.Functions[0].Body!.Statements[0]);
         var destroyedExpr = Assert.IsType<KokosDestroyedExpressionNode>(returnStatement.Expression);
         var operand = Assert.IsType<KokosIdentifierNode>(destroyedExpr.Operand);
         Assert.Equal("p", operand.Name);
@@ -601,7 +601,7 @@ public class ParserTests
             "function f(p: unowned Person): Int { if destroyed(p) { return 1; } return 0; }", out var diagnostics);
         Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
 
-        var ifStatement = Assert.IsType<KokosIfStatementNode>(unit.Functions[0].Body.Statements[0]);
+        var ifStatement = Assert.IsType<KokosIfStatementNode>(unit.Functions[0].Body!.Statements[0]);
         Assert.IsType<KokosDestroyedExpressionNode>(ifStatement.Condition);
     }
 
@@ -611,7 +611,7 @@ public class ParserTests
         var unit = KokosParser.Parse("function f(m: manual Person) { free(m); }", out var diagnostics);
         Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
 
-        var freeStatement = Assert.IsType<KokosFreeStatementNode>(unit.Functions[0].Body.Statements[0]);
+        var freeStatement = Assert.IsType<KokosFreeStatementNode>(unit.Functions[0].Body!.Statements[0]);
         var operand = Assert.IsType<KokosIdentifierNode>(freeStatement.Operand);
         Assert.Equal("m", operand.Name);
     }

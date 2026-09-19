@@ -1,4 +1,6 @@
-﻿using Kokos.Compiler.Diagnostics;
+﻿using System.Runtime.InteropServices;
+using System.Text;
+using Kokos.Compiler.Diagnostics;
 using Kokos.Compiler.Parsing;
 using Kokos.Compiler.Semantics;
 using Kokos.CodeGen;
@@ -21,6 +23,7 @@ public delegate long BinaryLongFunc(long a, long b);
 public delegate long TernaryLongFunc(long a, long b, long c);
 public delegate sbyte BinarySByteFunc(sbyte a, sbyte b);
 public delegate double BinaryDoubleFunc(double a, double b);
+public delegate int UnaryIntFunc(int a);
 
 public class CodeGenTests
 {
@@ -475,5 +478,99 @@ public class CodeGenTests
         var f = jit.GetFunction<BinaryLongFunc>("f");
 
         Assert.Equal(1030, f(30, 20));
+    }
+
+    // --- C interop: 'unmanaged', 'import'/'export' -----------------------------------------------
+
+    [Fact]
+    public void Import_function_calls_a_real_C_runtime_function()
+    {
+        // 'abs' is a real CRT symbol already loaded in the .NET host process — resolved the same way
+        // KokosJit's process-symbol generator already resolves malloc/free/abort.
+        using var jit = GenerateAndJit(
+            """
+            import function abs(n: Int32): Int32;
+
+            function myAbs(n: Int32): Int32 { return abs(n); }
+            """);
+
+        var myAbs = jit.GetFunction<UnaryIntFunc>("myAbs");
+
+        Assert.Equal(7, myAbs(-7));
+    }
+
+    [Fact]
+    public void Unmanaged_terminated_array_round_trips_through_a_real_C_function()
+    {
+        // strlen takes a real null-terminated C string — exactly what 'terminated [UInt8]' models.
+        // The exported function just forwards its own raw pointer straight through to it.
+        using var jit = GenerateAndJit(
+            """
+            import function strlen(str: unmanaged terminated [UInt8]): Int64;
+
+            export function myStrlen(str: unmanaged terminated [UInt8]): Int64 {
+                return strlen(str);
+            }
+            """);
+
+        var bytes = Encoding.ASCII.GetBytes("hello\0");
+        var buffer = Marshal.AllocHGlobal(bytes.Length);
+        try
+        {
+            Marshal.Copy(bytes, 0, buffer, bytes.Length);
+
+            var myStrlen = jit.GetFunction<UnaryPointerToLongFunc>("myStrlen");
+            Assert.Equal(5, myStrlen(buffer));
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    [Fact]
+    public void Unmanaged_struct_pointer_as_an_export_parameter_reads_a_field_written_by_a_real_C_caller()
+    {
+        // No generation prefix: the raw buffer below is written exactly as a C caller passing a
+        // 'Person*' would lay it out — the concrete proof 'unmanaged' strips the envelope correctly.
+        using var jit = GenerateAndJit(
+            """
+            struct Person { age: Int }
+
+            export function readAge(p: unmanaged Person): Int { return p.age; }
+            """);
+
+        var buffer = Marshal.AllocHGlobal(8);
+        try
+        {
+            Marshal.WriteInt64(buffer, 77);
+
+            var readAge = jit.GetFunction<UnaryPointerToLongFunc>("readAge");
+            Assert.Equal(77, readAge(buffer));
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    [Fact]
+    public void Owned_argument_is_automatically_stripped_to_unmanaged_at_the_call_site()
+    {
+        using var jit = GenerateAndJit(
+            """
+            struct Person { age: Int }
+
+            export function readAge(p: unmanaged Person): Int { return p.age; }
+
+            function makeAndRead(): Int {
+                let ownedPerson = Person(age: 99);
+                return readAge(ownedPerson);
+            }
+            """);
+
+        var makeAndRead = jit.GetFunction<NullaryLongFunc>("makeAndRead");
+
+        Assert.Equal(99, makeAndRead());
     }
 }

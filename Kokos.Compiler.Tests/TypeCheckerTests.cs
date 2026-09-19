@@ -1211,4 +1211,113 @@ public class TypeCheckerTests
         Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
         Assert.Same(KokosBoolType.Instance, functionType.ReturnType);
     }
+
+    // --- C interop: 'unmanaged', 'import'/'export' ---------------------------------------------
+
+    [Fact]
+    public void Export_function_with_an_owned_parameter_is_a_diagnostic()
+    {
+        const string source = """
+            struct Person { age: Int }
+
+            export function readAge(p: owned Person): Int { return p.age; }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[1]);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Export_function_with_an_unmanaged_parameter_type_checks_cleanly()
+    {
+        const string source = """
+            struct Person { age: Int }
+
+            export function readAge(p: unmanaged Person): Int { return p.age; }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[1]);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Import_function_with_an_owned_return_type_is_a_diagnostic()
+    {
+        const string source = """
+            struct Person { age: Int }
+
+            import function makePerson(): owned Person;
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[1]);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Import_function_with_a_primitive_signature_type_checks_cleanly()
+    {
+        var (unit, _, checker, diagnostics) = Setup("import function abs(n: Int32): Int32;");
+        var functionType = CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+        Assert.Same(KokosPrimitiveType.Int32, functionType.ReturnType);
+    }
+
+    [Fact]
+    public void Array_parameter_without_an_explicit_unmanaged_modifier_is_a_diagnostic()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f(bytes: [UInt8]): Int { return 0; }");
+        CheckFunction(checker, unit);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Array_parameter_with_an_explicit_unmanaged_modifier_is_not_a_diagnostic()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f(bytes: unmanaged [UInt8]): Int { return 0; }");
+        CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Assigning_an_unmanaged_reference_into_an_owned_local_is_a_diagnostic()
+    {
+        const string source = """
+            struct Person { age: Int }
+
+            function f(p: unmanaged Person): Int {
+                let q: owned Person = p;
+                return q.age;
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        CheckFunction(checker, unit, memberIndex: 1);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Passing_an_unmanaged_reference_into_an_unowned_parameter_is_a_diagnostic()
+    {
+        const string source = """
+            struct Person { age: Int }
+
+            function readAge(p: unowned Person): Int { return p.age; }
+            function f(p: unmanaged Person): Int { return readAge(p); }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[2]);
+
+        Assert.True(diagnostics.HasErrors);
+    }
 }

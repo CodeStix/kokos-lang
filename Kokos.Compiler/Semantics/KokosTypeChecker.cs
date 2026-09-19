@@ -225,14 +225,39 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             var ownership = KokosModifierMapper.OwnershipOf(parameter.Type, paramType, KokosOwnershipKind.Unowned);
             parameterOwnership.Add(ownership);
             _scope[parameter.Name] = new KokosBinding(paramType, ownership);
+
+            // VisitModifiedType already rejects the wrong *explicit* modifier on an array; this catches
+            // the remaining case — no modifier at all, silently defaulting to `Unowned`.
+            if (paramType is KokosArrayType && ownership != KokosOwnershipKind.Unmanaged)
+            {
+                _diagnostics.ReportError(parameter.Type.GetTokens().First().Span,
+                    "Arrays are only supported as 'unmanaged' in this phase; annotate this parameter with 'unmanaged'.");
+            }
         }
 
         _currentDeclaredReturnType = node.ReturnType is null ? null : _resolver.Resolve(node.ReturnType);
         _currentDeclaredReturnOwnership = node.ReturnType is null ? null : KokosModifierMapper.OwnershipOf(node.ReturnType);
 
+        if (_currentDeclaredReturnType is KokosArrayType && _currentDeclaredReturnOwnership != KokosOwnershipKind.Unmanaged)
+        {
+            _diagnostics.ReportError(node.NameToken.Span,
+                "Arrays are only supported as 'unmanaged' in this phase; annotate the return type with 'unmanaged'.");
+        }
+
         try
         {
-            node.Body.Accept(this);
+            // An `import function` declares an existing native function with no body to check at all —
+            // its parameter/return shapes were already resolved above (body-independent), so there's
+            // nothing here to infer, no move-checking to do (no locals), and nothing to release.
+            if (node.IsImported)
+            {
+                var importedReturnType = _currentDeclaredReturnType ?? KokosUnknownType.Instance;
+                var importedReturnOwnership = _currentDeclaredReturnOwnership ?? KokosOwnershipKind.Inferred;
+                CheckCBoundarySignature(node, parameterTypes, parameterOwnership, importedReturnType, importedReturnOwnership);
+                return new KokosFunctionType(parameterTypes, parameterOwnership, importedReturnType, importedReturnOwnership, node);
+            }
+
+            node.Body!.Accept(this);
             var effectiveReturnType = _currentDeclaredReturnType ?? InferReturnType(node, _currentReturnTypes);
             var effectiveReturnOwnership = _currentDeclaredReturnOwnership
                 ?? InferReturnOwnership(node, _currentReturnOwnerships, effectiveReturnType);
@@ -240,13 +265,16 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             // A function stays implicitly void-like (no requirement) only when it has neither a
             // declared return type nor any return-with-a-value anywhere in its body.
             var mustDefinitelyReturn = _currentDeclaredReturnType is not null || _currentReturnTypes.Count > 0;
-            if (mustDefinitelyReturn && !AlwaysReturns(node.Body))
+            if (mustDefinitelyReturn && !AlwaysReturns(node.Body!))
             {
                 _diagnostics.ReportError(node.NameToken.Span, $"Not all code paths in '{node.Name}' return a value.");
             }
 
             CheckNoOutstandingPartialMoves(node);
             RecordReleasePoint(node);
+
+            if (node.IsExported)
+                CheckCBoundarySignature(node, parameterTypes, parameterOwnership, effectiveReturnType, effectiveReturnOwnership);
 
             return new KokosFunctionType(parameterTypes, parameterOwnership, effectiveReturnType, effectiveReturnOwnership, node);
         }
@@ -260,6 +288,45 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             _consumed = outerConsumed;
         }
     }
+
+    /// <summary>
+    /// The signature rule for both `import` and `export`: every parameter and the return must be
+    /// something the platform C calling convention already handles correctly with no extra ABI-lowering
+    /// work — a primitive/`Bool` passed by value, or a pointer-shaped type with `unmanaged` ownership.
+    /// Rejects `owned`/`unowned`/`manual` (generation-tracked shapes C knows nothing about) and any
+    /// by-value struct/array (real C-ABI aggregate classification is a separate future phase).
+    /// </summary>
+    private void CheckCBoundarySignature(
+        KokosFunctionNode node,
+        IReadOnlyList<KokosType> parameterTypes,
+        IReadOnlyList<KokosOwnershipKind> parameterOwnership,
+        KokosType returnType,
+        KokosOwnershipKind returnOwnership)
+    {
+        for (var i = 0; i < parameterTypes.Count; i++)
+        {
+            if (!IsCBoundaryCompatible(parameterTypes[i], parameterOwnership[i]))
+            {
+                _diagnostics.ReportError(node.Parameters.Items[i].Type.GetTokens().First().Span,
+                    $"'{node.Name}' parameter '{node.Parameters.Items[i].Name}' isn't compatible with the C " +
+                    "calling convention: it must be a primitive/Bool passed by value, or an 'unmanaged' pointer.");
+            }
+        }
+
+        if (!IsCBoundaryCompatible(returnType, returnOwnership))
+        {
+            _diagnostics.ReportError(node.NameToken.Span,
+                $"'{node.Name}' return type isn't compatible with the C calling convention: it must be a " +
+                "primitive/Bool passed by value, or an 'unmanaged' pointer.");
+        }
+    }
+
+    private static bool IsCBoundaryCompatible(KokosType type, KokosOwnershipKind ownership) => type switch
+    {
+        KokosUnknownType or KokosErrorType => true,
+        KokosPrimitiveType or KokosBoolType => true,
+        _ => ownership == KokosOwnershipKind.Unmanaged,
+    };
 
     /// <summary>
     /// The semantic half of "compiler-inserted <c>free()</c>": a scope-end release of an owned
@@ -390,6 +457,22 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             : TryGetOwnership(node.Initializer, out var inferredOwnership)
                 ? inferredOwnership
                 : (variableType.IsPointerShaped ? KokosOwnershipKind.Owned : KokosOwnershipKind.Inferred);
+
+        if (node.Type is not null)
+        {
+            if (variableType is KokosArrayType && ownership != KokosOwnershipKind.Unmanaged)
+            {
+                _diagnostics.ReportError(node.NameToken.Span,
+                    "Arrays are only supported as 'unmanaged' in this phase; annotate '" + node.Name + "' with 'unmanaged'.");
+            }
+
+            if (ownership is KokosOwnershipKind.Owned or KokosOwnershipKind.Unowned or KokosOwnershipKind.Manual
+                && TryGetOwnership(node.Initializer, out var sourceOwnership) && sourceOwnership == KokosOwnershipKind.Unmanaged)
+            {
+                _diagnostics.ReportError(node.NameToken.Span,
+                    "Cannot use an 'unmanaged' reference where a tracked owned/unowned/manual reference is expected.");
+            }
+        }
 
         _scope[node.Name] = new KokosBinding(variableType, ownership);
         _localOwnership[node] = ownership;
@@ -730,6 +813,13 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             return KokosErrorType.Instance;
         }
 
+        if (ownership == KokosOwnershipKind.Unmanaged)
+        {
+            _diagnostics.ReportError(node.DestroyedKeyword.Span,
+                "'destroyed()' requires an 'unowned' or 'manual' reference; an 'unmanaged' pointer carries no generation to check.");
+            return KokosErrorType.Instance;
+        }
+
         return KokosBoolType.Instance;
     }
 
@@ -832,6 +922,14 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         {
             _diagnostics.ReportError(node.EqualsToken.Span,
                 $"Cannot assign a value of type '{valueType.DisplayName}' to a target of type '{targetType.DisplayName}'.");
+        }
+
+        if (TryGetOwnership(node.Target, out var assignmentTargetOwnership)
+            && assignmentTargetOwnership is KokosOwnershipKind.Owned or KokosOwnershipKind.Unowned or KokosOwnershipKind.Manual
+            && TryGetOwnership(node.Value, out var assignmentSourceOwnership) && assignmentSourceOwnership == KokosOwnershipKind.Unmanaged)
+        {
+            _diagnostics.ReportError(node.EqualsToken.Span,
+                "Cannot use an 'unmanaged' reference where a tracked owned/unowned/manual reference is expected.");
         }
 
         if (TryGetOwnership(node.Target, out var targetOwnership) && targetOwnership == KokosOwnershipKind.Owned)
@@ -1084,6 +1182,13 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
 
                 if (parameterOwnership == KokosOwnershipKind.Owned)
                     MarkTransferred(argument.Expression);
+
+                if (parameterOwnership is KokosOwnershipKind.Owned or KokosOwnershipKind.Unowned or KokosOwnershipKind.Manual
+                    && TryGetOwnership(argument.Expression, out var argumentOwnership) && argumentOwnership == KokosOwnershipKind.Unmanaged)
+                {
+                    _diagnostics.ReportError(SpanOf(argument.Expression),
+                        "Cannot use an 'unmanaged' reference where a tracked owned/unowned/manual reference is expected.");
+                }
             }
         }
 

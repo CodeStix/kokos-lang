@@ -82,8 +82,15 @@ public sealed class KokosParser
         _ => ParseFunctionDeclaration(),
     };
 
+    /// <summary>
+    /// An optional leading <c>export</c>/<c>import</c> keyword (same "optional leading modifier"
+    /// pattern as <c>opaque type</c>/<c>value struct</c>) changes how the body is parsed: <c>import</c>
+    /// declares an existing native function with no body at all (just a trailing <c>;</c>); everything
+    /// else, including <c>export</c>, is an ordinary function with a real block body.
+    /// </summary>
     private KokosFunctionNode ParseFunctionDeclaration()
     {
+        var leadingKeyword = Current.Kind is TokenKind.ExportKeyword or TokenKind.ImportKeyword ? Advance() : null;
         var functionKeyword = Expect(TokenKind.FunctionKeyword, "'function'");
         var name = Expect(TokenKind.Identifier, "a function name");
         var openParen = Expect(TokenKind.OpenParen, "'('");
@@ -98,9 +105,14 @@ public sealed class KokosParser
             returnType = ParseType();
         }
 
-        var body = ParseBlock();
+        KokosBlockNode? body = null;
+        KokosToken? semicolon = null;
+        if (leadingKeyword?.Kind == TokenKind.ImportKeyword)
+            semicolon = Expect(TokenKind.Semicolon, "';'");
+        else
+            body = ParseBlock();
 
-        return new KokosFunctionNode(functionKeyword, name, openParen, parameters, closeParen, colon, returnType, body);
+        return new KokosFunctionNode(leadingKeyword, functionKeyword, name, openParen, parameters, closeParen, colon, returnType, body, semicolon);
     }
 
     private KokosParameterNode ParseParameter()
@@ -229,7 +241,7 @@ public sealed class KokosParser
     /// </summary>
     private KokosTypeNode ParseModifiedType()
     {
-        if (Current.Kind is TokenKind.OwnedKeyword or TokenKind.UnownedKeyword or TokenKind.ManualKeyword)
+        if (Current.Kind is TokenKind.OwnedKeyword or TokenKind.UnownedKeyword or TokenKind.ManualKeyword or TokenKind.UnmanagedKeyword)
         {
             var modifierToken = Advance();
             return new KokosModifiedTypeNode(modifierToken, ParseAtomicType());

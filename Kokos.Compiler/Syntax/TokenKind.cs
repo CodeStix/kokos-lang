@@ -29,8 +29,11 @@ public enum TokenKind
     OwnedKeyword,
     UnownedKeyword,
     ManualKeyword,
+    UnmanagedKeyword,
     DestroyedKeyword,
     FreeKeyword,
+    ImportKeyword,
+    ExportKeyword,
 
     // Punctuation
     OpenParen,

@@ -4,9 +4,16 @@ namespace Kokos.Compiler.Syntax.Nodes;
 /// A function declaration: <c>function name(params): ReturnType { body }</c>. The return type
 /// annotation is optional in the grammar (<see cref="ColonToken"/>/<see cref="ReturnType"/> are
 /// both null when omitted).
+///
+/// An optional leading <see cref="LeadingKeyword"/> (<c>export</c>/<c>import</c>) changes the shape
+/// of what follows: an <c>import</c> function declares an existing native function with no body at
+/// all — <see cref="Body"/> is null and <see cref="SemicolonToken"/> takes its place instead. Every
+/// other function (plain, or <c>export</c>) always has a real <see cref="Body"/> and a null
+/// <see cref="SemicolonToken"/>.
 /// </summary>
 public sealed class KokosFunctionNode : KokosMemberNode
 {
+    public KokosToken? LeadingKeyword { get; }
     public KokosToken FunctionKeyword { get; }
     public KokosToken NameToken { get; }
     public string Name => NameToken.Text;
@@ -15,9 +22,14 @@ public sealed class KokosFunctionNode : KokosMemberNode
     public KokosToken CloseParenToken { get; }
     public KokosToken? ColonToken { get; }
     public KokosTypeNode? ReturnType { get; }
-    public KokosBlockNode Body { get; }
+    public KokosBlockNode? Body { get; }
+    public KokosToken? SemicolonToken { get; }
+
+    public bool IsExported => LeadingKeyword?.Kind == TokenKind.ExportKeyword;
+    public bool IsImported => LeadingKeyword?.Kind == TokenKind.ImportKeyword;
 
     public KokosFunctionNode(
+        KokosToken? leadingKeyword,
         KokosToken functionKeyword,
         KokosToken nameToken,
         KokosToken openParenToken,
@@ -25,8 +37,10 @@ public sealed class KokosFunctionNode : KokosMemberNode
         KokosToken closeParenToken,
         KokosToken? colonToken,
         KokosTypeNode? returnType,
-        KokosBlockNode body)
+        KokosBlockNode? body,
+        KokosToken? semicolonToken)
     {
+        LeadingKeyword = leadingKeyword;
         FunctionKeyword = functionKeyword;
         NameToken = nameToken;
         OpenParenToken = openParenToken;
@@ -35,7 +49,9 @@ public sealed class KokosFunctionNode : KokosMemberNode
         ColonToken = colonToken;
         ReturnType = returnType;
         Body = body;
+        SemicolonToken = semicolonToken;
 
+        AddChild(leadingKeyword);
         AddChild(functionKeyword);
         AddChild(nameToken);
         AddChild(openParenToken);
@@ -44,6 +60,7 @@ public sealed class KokosFunctionNode : KokosMemberNode
         AddChild(colonToken);
         AddChild(returnType);
         AddChild(body);
+        AddChild(semicolonToken);
     }
 
     public override T Accept<T>(IKokosVisitor<T> visitor) => visitor.VisitFunction(this);

@@ -1,0 +1,16 @@
+
+
+struct Person { age: Int32 }
+
+import function abs(n: Int32): Int32;
+
+export function readAge(p: unmanaged Person): Int32 {
+    return p.age;
+}
+
+function main(): Int32 {
+    let ownedPerson = Person(age: 42);
+    let a = readAge(ownedPerson);
+    let b = abs(0 - 10);
+    return a + b;
+}
