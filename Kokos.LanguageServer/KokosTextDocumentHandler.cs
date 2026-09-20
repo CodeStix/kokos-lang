@@ -11,13 +11,15 @@ namespace Kokos.LanguageServer;
 internal sealed class KokosTextDocumentHandler : TextDocumentSyncHandlerBase
 {
     private readonly ILanguageServerFacade _server;
+    private readonly KokosDocumentStore _documents;
 
     private static readonly TextDocumentSelector DocumentSelector = new(
         new TextDocumentFilter { Pattern = "**/*.kokos" });
 
-    public KokosTextDocumentHandler(ILanguageServerFacade server)
+    public KokosTextDocumentHandler(ILanguageServerFacade server, KokosDocumentStore documents)
     {
         _server = server;
+        _documents = documents;
     }
 
     public override TextDocumentAttributes GetTextDocumentAttributes(DocumentUri uri) =>
@@ -41,6 +43,7 @@ internal sealed class KokosTextDocumentHandler : TextDocumentSyncHandlerBase
 
     public override Task<Unit> Handle(DidCloseTextDocumentParams request, CancellationToken cancellationToken)
     {
+        _documents.Remove(request.TextDocument.Uri);
         _server.TextDocument.PublishDiagnostics(new PublishDiagnosticsParams
         {
             Uri = request.TextDocument.Uri,
@@ -51,6 +54,8 @@ internal sealed class KokosTextDocumentHandler : TextDocumentSyncHandlerBase
 
     private void PublishDiagnostics(DocumentUri uri, string text)
     {
+        _documents.Set(uri, text);
+
         var diagnostics = KokosDocumentDiagnostics.Compute(text);
         _server.TextDocument.PublishDiagnostics(new PublishDiagnosticsParams
         {

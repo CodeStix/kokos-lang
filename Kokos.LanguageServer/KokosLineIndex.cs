@@ -27,4 +27,12 @@ internal sealed class KokosLineIndex
 
         return (line, offset - _lineStarts[line]);
     }
+
+    /// <summary>The inverse of <see cref="GetLineCharacter"/> — used to turn a hover request's LSP
+    /// position back into the character offset Kokos.Compiler's TextSpans are expressed in.</summary>
+    public int GetOffset(int line, int character)
+    {
+        var clampedLine = Math.Clamp(line, 0, _lineStarts.Length - 1);
+        return _lineStarts[clampedLine] + character;
+    }
 }

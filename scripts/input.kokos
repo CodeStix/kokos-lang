@@ -27,6 +27,6 @@ export function main() {
     return str.length;
 }
 
-function createPerson(name: CString, age: Int) {
+function createPerson(name: CString, age: Int): Person {
     return Person(name: name, age: age);
 }

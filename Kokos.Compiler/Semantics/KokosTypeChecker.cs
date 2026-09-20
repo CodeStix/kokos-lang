@@ -31,6 +31,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
     private readonly Dictionary<KokosFunctionNode, KokosFunctionType> _functionTypes = new();
     private readonly Dictionary<KokosExpressionNode, KokosType> _expressionTypes = new();
     private readonly Dictionary<KokosVarDeclNode, KokosOwnershipKind> _localOwnership = new();
+    private readonly Dictionary<KokosExpressionNode, KokosOwnershipKind> _expressionOwnership = new();
     private readonly Dictionary<KokosVarDeclNode, KokosType> _localTypes = new();
     private readonly Dictionary<KokosNode, IReadOnlyList<string>> _releasePoints = new();
     private readonly HashSet<KokosFunctionNode> _inProgress = new();
@@ -42,6 +43,16 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
 
     /// <summary>Every expression's resolved type, keyed by node — consumed by codegen so it never re-derives what this checker already decided.</summary>
     public IReadOnlyDictionary<KokosExpressionNode, KokosType> ExpressionTypes => _expressionTypes;
+
+    /// <summary>
+    /// Every identifier/field-access expression's resolved ownership, keyed by node. Populated
+    /// alongside <see cref="ExpressionTypes"/> wherever an expression's ownership is resolved from a
+    /// live binding (<see cref="_scope"/>) during the check pass — unlike <see cref="TryGetOwnership"/>,
+    /// which reads <see cref="_scope"/> live and is therefore only meaningful *during* that pass, this
+    /// persists past it so an external consumer (e.g. the language server's hover handler) can look an
+    /// already-checked expression's ownership back up afterward.
+    /// </summary>
+    public IReadOnlyDictionary<KokosExpressionNode, KokosOwnershipKind> ExpressionOwnership => _expressionOwnership;
 
     /// <summary>Every `let` local's resolved ownership, keyed by declaration — consumed by codegen to pick the right LLVM representation (bare pointer vs. reference pair).</summary>
     public IReadOnlyDictionary<KokosVarDeclNode, KokosOwnershipKind> LocalOwnership => _localOwnership;
@@ -546,6 +557,8 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
                 _diagnostics.ReportError(node.NameToken.Span,
                     "Cannot use an 'unmanaged' reference where a tracked owned/unowned/manual reference is expected.");
             }
+
+            CheckNoLeakingWeakening(node.Initializer, ownership, node.NameToken.Span, "This initializer");
         }
 
         _scope[node.Name] = new KokosBinding(variableType, ownership);
@@ -588,6 +601,10 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
                 _currentReturnOwnerships.Add(TryGetOwnership(node.Expression, out var returnOwnership)
                     ? returnOwnership
                     : KokosOwnershipKind.Inferred);
+            }
+            else
+            {
+                CheckNoLeakingWeakening(node.Expression, _currentDeclaredReturnOwnership.Value, node.ReturnKeyword.Span, "This return value", exemptStorageBacked: false);
             }
         }
 
@@ -685,6 +702,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             if (!_suppressWholeMoveCheck)
                 CheckWholeValueAvailable(node.Name, node.NameToken.Span, binding.Ownership);
 
+            _expressionOwnership[node] = binding.Ownership;
             return binding.Type;
         }
 
@@ -981,13 +999,67 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             : structType.FindField(memberName);
 
     /// <summary>
+    /// True when this expression denotes an existing storage location (a bound local/parameter/static,
+    /// one of its fields, or an array element) rather than a fresh, unbound temporary. This is exactly
+    /// the distinction <see cref="CheckNoLeakingWeakening"/> needs: reborrowing a storage-backed owned
+    /// value as `unowned` is safe, since the storage itself still owns the allocation and will release it
+    /// later, but reborrowing a temporary (a construction call, a plain function call, ...) throws away
+    /// the only handle that could ever free it.
+    /// </summary>
+    private bool IsStorageBacked(KokosExpressionNode expression) => expression switch
+    {
+        KokosIdentifierNode identifier => _scope.ContainsKey(identifier.Name),
+        KokosMemberAccessNode access => IsStorageBacked(access.Target),
+        KokosIndexNode index => IsStorageBacked(index.Target),
+        _ => false,
+    };
+
+    /// <summary>
+    /// Reports an error when a freshly-`owned` value is weakened to `unowned` in a way that leaves
+    /// nothing able to ever free it. `unowned` is deliberately the one ownership kind `free()`/
+    /// `destroyed()` can never target, so once a uniquely-owned allocation is converted to `unowned`
+    /// with no other still-live `owned`/`manual` handle anywhere, it's unreachable by any freeing
+    /// operation for the rest of the program — a permanent leak. `manual` is never checked here: an
+    /// `owned -> manual` conversion is a pure bit-reinterpretation (see
+    /// <see cref="KokosCodeGenerator.ConvertOwnership"/>'s reborrow, in Kokos.CodeGen) that keeps the
+    /// same underlying pointer alive, so whoever ends up with the `manual` value can always `free()` it
+    /// later — there's nothing to leak.
+    ///
+    /// For most call sites (a var-decl initializer, a call argument, a construction-call field, an
+    /// assignment's value), a storage-backed source is exempt: none of those actually consume/transfer
+    /// the source when weakening it to `unowned` (each gates its own `MarkTransferred` call on the
+    /// *target* ownership being `Owned`), so the original `owned` binding stays live and is freed
+    /// normally later. A `return` statement is the one exception — per spec, returning unconditionally
+    /// consumes whatever's returned regardless of the declared return ownership, so even a
+    /// storage-backed local leaks once returned as `unowned`; that call site passes
+    /// <paramref name="exemptStorageBacked"/>: false.
+    /// </summary>
+    private void CheckNoLeakingWeakening(KokosExpressionNode expression, KokosOwnershipKind toOwnership, TextSpan span, string what, bool exemptStorageBacked = true)
+    {
+        if (toOwnership != KokosOwnershipKind.Unowned)
+            return;
+
+        if (!TryGetOwnership(expression, out var fromOwnership) || fromOwnership != KokosOwnershipKind.Owned)
+            return;
+
+        if (exemptStorageBacked && IsStorageBacked(expression))
+            return;
+
+        _diagnostics.ReportError(span,
+            $"{what} produces an 'owned' value with nothing left to free it once it's 'unowned' here — " +
+            "it would leak permanently. Keep it 'owned'/'manual', or bind it to an 'owned'/'manual' local that outlives this use.");
+    }
+
+    /// <summary>
     /// Resolves an expression's ownership where possible: a bound identifier, a direct struct-field
     /// access, a construction call (always fresh and uniquely owned), or an ordinary function call
     /// (whatever the callee's own return ownership resolved to). Anything else (a ternary, an
     /// arithmetic result, ...) isn't tracked and returns false — used identically by `destroyed()`'s
-    /// and `free()`'s "cannot determine ownership" diagnostics.
+    /// and `free()`'s "cannot determine ownership" diagnostics. Also exposed publicly so external
+    /// consumers (e.g. the language server's hover handler) can describe an already-checked
+    /// expression's effective ownership without re-implementing this resolution themselves.
     /// </summary>
-    private bool TryGetOwnership(KokosExpressionNode expression, out KokosOwnershipKind ownership)
+    public bool TryGetOwnership(KokosExpressionNode expression, out KokosOwnershipKind ownership)
     {
         if (expression is KokosIdentifierNode identifier && _scope.TryGetValue(identifier.Name, out var binding))
         {
@@ -1087,6 +1159,8 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
                 "Cannot use an 'unmanaged' reference where a tracked owned/unowned/manual reference is expected.");
         }
 
+        CheckNoLeakingWeakening(node.Value, assignmentTargetOwnership, node.EqualsToken.Span, "This assignment");
+
         if (TryGetOwnership(node.Target, out var targetOwnership) && targetOwnership == KokosOwnershipKind.Owned)
         {
             // A fresh value is being written here — clear any stale "moved" marker for this exact
@@ -1137,6 +1211,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         {
             targetType = baseBinding.Type;
             _expressionTypes[node.Target] = targetType;
+            _expressionOwnership[node.Target] = baseBinding.Ownership;
 
             if (_consumed.Contains(baseIdentifier.Name))
             {
@@ -1162,7 +1237,10 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             var field = FindField(structType, node.NameToken, node.MemberName);
 
             if (field is not null)
+            {
+                _expressionOwnership[node] = field.Ownership;
                 return field.Type;
+            }
 
             _diagnostics.ReportError(node.NameToken.Span, $"'{structType.DisplayName}' has no field '{node.MemberName}'.");
             return KokosErrorType.Instance;
@@ -1258,6 +1336,8 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
                         $"Cannot assign a value of type '{argType.DisplayName}' to field " +
                         $"'{field.Name ?? field.OrdinalPosition.ToString()}' of type '{field.Type.DisplayName}'.");
                 }
+
+                CheckNoLeakingWeakening(argument.Expression, field.Ownership, SpanOf(argument.Expression), "This field value");
             }
             else
             {
@@ -1345,6 +1425,8 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
                 // parameter — an owned-typed parameter consumes its argument; unowned is a reborrow.
                 var parameterOwnership = KokosModifierMapper.OwnershipOf(
                     functionType.Declaration.Parameters.Items[i].Type, expectedType, KokosOwnershipKind.Unowned, _table);
+
+                CheckNoLeakingWeakening(argument.Expression, parameterOwnership, SpanOf(argument.Expression), "This argument");
 
                 if (parameterOwnership == KokosOwnershipKind.Owned)
                     MarkTransferred(argument.Expression);

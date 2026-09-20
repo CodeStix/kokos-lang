@@ -1212,6 +1212,180 @@ public class TypeCheckerTests
         Assert.Same(KokosBoolType.Instance, functionType.ReturnType);
     }
 
+    // --- Ownership leak checks: weakening a fresh 'owned' value to 'unowned' -------------------
+
+    [Fact]
+    public void Returning_a_freshly_constructed_value_as_unowned_is_a_diagnostic()
+    {
+        const string source = """
+            struct Person { age: Int }
+
+            function createPerson(age: Int): unowned Person {
+                return Person(age: age);
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[1]);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Returning_a_freshly_constructed_value_as_owned_is_not_a_diagnostic()
+    {
+        const string source = """
+            struct Person { age: Int }
+
+            function createPerson(age: Int): owned Person {
+                return Person(age: age);
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[1]);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Returning_a_freshly_constructed_value_as_manual_is_not_a_diagnostic()
+    {
+        // 'manual' is a pure bit-reinterpretation of the same pointer (see ConvertOwnership's
+        // reborrow) — whoever ends up with the value can still free() it, so nothing leaks.
+        const string source = """
+            struct Person { age: Int }
+
+            function createPerson(age: Int): manual Person {
+                return Person(age: age);
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[1]);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Returning_a_storage_backed_owned_local_as_unowned_is_still_a_diagnostic()
+    {
+        // Unlike passing it as an argument or binding it to another local, a return statement
+        // unconditionally consumes whatever it returns regardless of the declared return ownership —
+        // so even though 'p' is a real, storage-backed local, this leaks it exactly like the
+        // fresh-construction case above.
+        const string source = """
+            struct Person { age: Int }
+
+            function createPerson(age: Int): unowned Person {
+                let p: Person = Person(age: age);
+                return p;
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[1]);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Passing_a_storage_backed_owned_local_as_an_unowned_argument_is_not_a_diagnostic()
+    {
+        // Argument passing only consumes the source when the *parameter* is owned — an unowned
+        // parameter leaves the caller's local untouched, so it's still freed normally later.
+        const string source = """
+            struct Person { age: Int }
+
+            function borrow(p: unowned Person): Int { return p.age; }
+
+            function f(age: Int): Int {
+                let p: Person = Person(age: age);
+                return borrow(p);
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[1]);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[2]);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Passing_a_freshly_constructed_value_as_an_unowned_argument_is_a_diagnostic()
+    {
+        const string source = """
+            struct Person { age: Int }
+
+            function borrow(p: unowned Person): Int { return p.age; }
+
+            function f(age: Int): Int {
+                return borrow(Person(age: age));
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[1]);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[2]);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Binding_a_freshly_constructed_value_to_an_unowned_local_is_a_diagnostic()
+    {
+        const string source = """
+            struct Person { age: Int }
+
+            function f(age: Int): Int {
+                let p: unowned Person = Person(age: age);
+                return p.age;
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[1]);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Assigning_a_freshly_constructed_value_into_an_unowned_target_is_a_diagnostic()
+    {
+        const string source = """
+            struct Person { age: Int }
+
+            function f(age: Int, target: unowned Person): Int {
+                target = Person(age: age);
+                return target.age;
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[1]);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Passing_a_freshly_constructed_value_into_an_unowned_struct_field_is_a_diagnostic()
+    {
+        const string source = """
+            struct Person { age: Int }
+            struct Family { favoritePerson: unowned Person }
+
+            function f(age: Int): Family {
+                return Family(favoritePerson: Person(age: age));
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[2]);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
     // --- C interop: 'unmanaged', 'import'/'export' ---------------------------------------------
 
     [Fact]
