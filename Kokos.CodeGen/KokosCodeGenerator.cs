@@ -1,3 +1,4 @@
+﻿using System.Text;
 using Kokos.Compiler.Semantics;
 using Kokos.Compiler.Syntax;
 using Kokos.Compiler.Syntax.Nodes;
@@ -60,6 +61,15 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     private readonly LLVMValueRef _freeFunction;
     private readonly LLVMTypeRef _freeFunctionType;
     private readonly LLVMTypeRef _abortFunctionType;
+
+    /// <summary>Deduplicates identical string-literal text onto one shared global envelope — see <see cref="GetOrCreateStringLiteralEnvelope"/>.</summary>
+    private readonly Dictionary<string, LLVMValueRef> _stringLiteralEnvelopes = new();
+
+    /// <summary>
+    /// One LLVM global per `static let` variable, declared once (see <see cref="DeclareStaticVariables"/>)
+    /// and used to seed every function's <see cref="_scope"/> — see <see cref="DefineFunctionBody"/>.
+    /// </summary>
+    private readonly Dictionary<string, (LLVMValueRef Pointer, LLVMTypeRef Type, KokosOwnershipKind Ownership, KokosType KokosType)> _staticVariables = new();
 
     public KokosCodeGenerator(KokosDeclarationTable table, KokosTypeChecker checker, string moduleName)
     {
@@ -148,6 +158,8 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
 
     public LLVMValueRef VisitCompilationUnit(KokosCompilationUnitNode node)
     {
+        DeclareStaticVariables();
+
         var functions = node.Members.OfType<KokosFunctionNode>().ToList();
 
         // Two passes — declare every function's signature first, then generate bodies. This is what
@@ -168,6 +180,26 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         }
 
         return default;
+    }
+
+    /// <summary>
+    /// One LLVM global per `static let` variable, zero-initialized (a global's initial value has to be
+    /// a compile-time constant, and "zeroed" — a null pointer for any pointer-shaped ownership, or a
+    /// recursively-zeroed aggregate — is the only one this phase produces; there's no initializer
+    /// syntax to evaluate one from). Always `internal` linkage — a static has no `export` concept of
+    /// its own, so it's never a public symbol of the module.
+    /// </summary>
+    private void DeclareStaticVariables()
+    {
+        foreach (var (name, (type, ownership)) in _checker.StaticVariables)
+        {
+            var llvmType = _typeMapper.Map(type, ownership);
+            var global = _module.AddGlobal(llvmType, name);
+            global.Initializer = LLVMValueRef.CreateConstNull(llvmType);
+            global.Linkage = LLVMLinkage.LLVMInternalLinkage;
+
+            _staticVariables[name] = (global, llvmType, ownership, type);
+        }
     }
 
     /// <summary>
@@ -201,6 +233,12 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         _scope = [];
         _currentFunction = function;
         _currentFunctionType = functionType;
+
+        // Every static variable is visible from every function — seeded in before parameters (which
+        // may legitimately shadow one) so VisitIdentifier/VisitAssignment/etc. address the real global
+        // directly, with no special-casing beyond this one seeding step.
+        foreach (var (name, binding) in _staticVariables)
+            _scope[name] = binding;
 
         try
         {
@@ -579,6 +617,8 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         // allocation — mirrors the struct-construction case above (this phase never infers a `value`
         // vector result from construction syntax alone).
         KokosArrayConstructionNode => KokosOwnershipKind.Owned,
+        // A string literal is always 'unowned' — see KokosTypeChecker.VisitLiteralString.
+        KokosLiteralStringNode => KokosOwnershipKind.Unowned,
         _ => KokosOwnershipKind.Owned,
     };
 
@@ -1129,8 +1169,66 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     public LLVMValueRef VisitEnumDecl(KokosEnumDeclNode node) => throw NotYet(nameof(KokosEnumDeclNode), "declarations aren't codegen'd directly, only referenced through resolved types — and enums still need a chosen representation regardless");
     public LLVMValueRef VisitEnumVariant(KokosEnumVariantNode node) => throw NotYet(nameof(KokosEnumVariantNode), "has no standalone codegen; only meaningful as part of resolving its enum");
     public LLVMValueRef VisitStructDecl(KokosStructDeclNode node) => throw NotYet(nameof(KokosStructDeclNode), "declarations aren't codegen'd directly, only referenced through resolved types");
+    public LLVMValueRef VisitStaticVarDecl(KokosStaticVarDeclNode node) => throw NotYet(nameof(KokosStaticVarDeclNode), "declarations aren't codegen'd directly — see DeclareStaticVariables");
     public LLVMValueRef VisitField(KokosFieldNode node) => throw NotYet(nameof(KokosFieldNode), "has no standalone codegen; only meaningful as part of resolving its struct/tuple");
-    public LLVMValueRef VisitLiteralString(KokosLiteralStringNode node) => throw NotYet(nameof(KokosLiteralStringNode), "needs a chosen string runtime representation");
+    /// <summary>
+    /// A string literal is a global constant with exactly the shape of an `unowned [Int8]` — a
+    /// `{ envelopePointer, i64 capturedGeneration }` pair over an `{ i64 generation, { i64 length,
+    /// i8* ptr } }` envelope, all compile-time constants (generation is always 0 and never changes —
+    /// a literal is never freed). Identical literal text shares one global (see
+    /// <see cref="_stringLiteralEnvelopes"/>).
+    /// </summary>
+    public LLVMValueRef VisitLiteralString(KokosLiteralStringNode node)
+    {
+        var arrayType = (KokosArrayType)_checker.ExpressionTypes[node];
+        var envelopeGlobal = GetOrCreateStringLiteralEnvelope(node.Value);
+
+        var pairType = _typeMapper.Map(arrayType, KokosOwnershipKind.Unowned);
+        var generation = LLVMValueRef.CreateConstInt(Context.Int64Type, 0, false);
+        var pair = _builder.BuildInsertValue(pairType.Undef, envelopeGlobal, 0, "strlit");
+        return _builder.BuildInsertValue(pair, generation, 1, "strlit");
+    }
+
+    /// <summary>
+    /// Builds (or reuses) the global envelope backing a string literal's UTF-8 bytes, with a hidden
+    /// trailing `\0` appended after the real bytes purely so the raw pointer is already a valid C
+    /// string once stripped down to `unmanaged` — the hidden byte is not reflected in the array's own
+    /// `length` field.
+    /// </summary>
+    private LLVMValueRef GetOrCreateStringLiteralEnvelope(string value)
+    {
+        if (_stringLiteralEnvelopes.TryGetValue(value, out var cached))
+            return cached;
+
+        var utf8Bytes = Encoding.UTF8.GetBytes(value);
+        var bytesWithHiddenNul = new byte[utf8Bytes.Length + 1];
+        Array.Copy(utf8Bytes, bytesWithHiddenNul, utf8Bytes.Length);
+
+        var index = _stringLiteralEnvelopes.Count;
+        var byteConstants = bytesWithHiddenNul.Select(b => LLVMValueRef.CreateConstInt(Context.Int8Type, b, false)).ToArray();
+        var bytesType = LLVMTypeRef.CreateArray(Context.Int8Type, (uint)bytesWithHiddenNul.Length);
+        var bytesGlobal = _module.AddGlobal(bytesType, $"str.{index}.bytes");
+        bytesGlobal.Initializer = LLVMValueRef.CreateConstArray(Context.Int8Type, byteConstants);
+        bytesGlobal.IsGlobalConstant = true;
+        bytesGlobal.Linkage = LLVMLinkage.LLVMInternalLinkage;
+
+        var arrayType = new KokosArrayType(KokosArrayKind.Dynamic, KokosPrimitiveType.Int8);
+        var bodyType = _typeMapper.MapArrayBody(arrayType);
+        var lengthConst = LLVMValueRef.CreateConstInt(Context.Int64Type, (ulong)utf8Bytes.Length, false);
+        var bodyConst = LLVMValueRef.CreateConstNamedStruct(bodyType, new LLVMValueRef[] { lengthConst, bytesGlobal });
+
+        var envelopeType = _typeMapper.MapEnvelope(arrayType);
+        var generationConst = LLVMValueRef.CreateConstInt(Context.Int64Type, 0, false);
+        var envelopeConst = LLVMValueRef.CreateConstNamedStruct(envelopeType, new LLVMValueRef[] { generationConst, bodyConst });
+
+        var envelopeGlobal = _module.AddGlobal(envelopeType, $"str.{index}");
+        envelopeGlobal.Initializer = envelopeConst;
+        envelopeGlobal.IsGlobalConstant = true;
+        envelopeGlobal.Linkage = LLVMLinkage.LLVMInternalLinkage;
+
+        _stringLiteralEnvelopes[value] = envelopeGlobal;
+        return envelopeGlobal;
+    }
     /// <summary>`destroyed(x)` — compares the current allocation generation against x's captured one and returns the mismatch as a plain Bool. Never traps: this is the whole point of checking safely instead of dereferencing blindly.</summary>
     public LLVMValueRef VisitDestroyedExpression(KokosDestroyedExpressionNode node)
     {

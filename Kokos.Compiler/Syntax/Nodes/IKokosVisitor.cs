@@ -10,6 +10,7 @@ public interface IKokosVisitor<out T>
 {
     T VisitCompilationUnit(KokosCompilationUnitNode node);
     T VisitFunction(KokosFunctionNode node);
+    T VisitStaticVarDecl(KokosStaticVarDeclNode node);
     T VisitParameter(KokosParameterNode node);
     T VisitNamedType(KokosNamedTypeNode node);
     T VisitArrayType(KokosArrayTypeNode node);

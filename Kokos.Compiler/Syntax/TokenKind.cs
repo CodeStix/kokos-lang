@@ -12,6 +12,7 @@ public enum TokenKind
     // Keywords
     FunctionKeyword,
     LetKeyword,
+    StaticKeyword,
     ReturnKeyword,
     TypeKeyword,
     OpaqueKeyword,

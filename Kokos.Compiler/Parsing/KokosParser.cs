@@ -79,8 +79,20 @@ public sealed class KokosParser
         TokenKind.TypeKeyword or TokenKind.OpaqueKeyword => ParseTypeAlias(),
         TokenKind.EnumKeyword => ParseEnumDecl(),
         TokenKind.StructKeyword or TokenKind.ValueKeyword => ParseStructDecl(),
+        TokenKind.StaticKeyword => ParseStaticVarDecl(),
         _ => ParseFunctionDeclaration(),
     };
+
+    private KokosStaticVarDeclNode ParseStaticVarDecl()
+    {
+        var staticKeyword = Expect(TokenKind.StaticKeyword, "'static'");
+        var letKeyword = Expect(TokenKind.LetKeyword, "'let'");
+        var name = Expect(TokenKind.Identifier, "a variable name");
+        var colon = Expect(TokenKind.Colon, "':'");
+        var type = ParseType();
+        var semicolon = Expect(TokenKind.Semicolon, "';'");
+        return new KokosStaticVarDeclNode(staticKeyword, letKeyword, name, colon, type, semicolon);
+    }
 
     /// <summary>
     /// An optional leading <c>export</c>/<c>import</c> keyword (same "optional leading modifier"

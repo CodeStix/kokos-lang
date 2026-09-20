@@ -4,10 +4,10 @@ using Kokos.Compiler.Syntax.Nodes;
 namespace Kokos.Compiler.Semantics;
 
 /// <summary>
-/// Indexes every top-level declaration in a file by name, before anything is resolved. All four
-/// member kinds (function/type-alias/enum/struct) share one namespace — a struct and a function
-/// can't share a name, since a construction call and an ordinary call look identical at the syntax
-/// level and have to be disambiguated by which single declaration the name resolves to.
+/// Indexes every top-level declaration in a file by name, before anything is resolved. All five
+/// member kinds (function/type-alias/enum/struct/static-variable) share one namespace — a struct and
+/// a function can't share a name, since a construction call and an ordinary call look identical at the
+/// syntax level and have to be disambiguated by which single declaration the name resolves to.
 ///
 /// This is what makes forward references work: <see cref="KokosTypeResolver"/> and
 /// <see cref="KokosTypeChecker"/> never process the file top-to-bottom — they look a name up here
@@ -42,6 +42,10 @@ public sealed class KokosDeclarationTable
                     name = function.Name;
                     span = function.NameToken.Span;
                     break;
+                case KokosStaticVarDeclNode staticVar:
+                    name = staticVar.Name;
+                    span = staticVar.NameToken.Span;
+                    break;
             }
 
             if (name is null)
@@ -69,6 +73,8 @@ public sealed class KokosDeclarationTable
     public bool TryGetEnum(string name, out KokosEnumDeclNode node) => TryGetAs(name, out node);
     public bool TryGetStruct(string name, out KokosStructDeclNode node) => TryGetAs(name, out node);
     public bool TryGetFunction(string name, out KokosFunctionNode node) => TryGetAs(name, out node);
+    public bool TryGetStaticVariable(string name, out KokosStaticVarDeclNode node) => TryGetAs(name, out node);
 
     public IEnumerable<KokosFunctionNode> Functions => _members.Values.OfType<KokosFunctionNode>();
+    public IEnumerable<KokosStaticVarDeclNode> StaticVariables => _members.Values.OfType<KokosStaticVarDeclNode>();
 }

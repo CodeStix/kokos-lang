@@ -315,5 +315,6 @@ public sealed class KokosTypeResolver : IKokosVisitor<KokosType>
     public KokosType VisitEnumDecl(KokosEnumDeclNode node) => throw NotAType(nameof(KokosEnumDeclNode));
     public KokosType VisitEnumVariant(KokosEnumVariantNode node) => throw NotAType(nameof(KokosEnumVariantNode));
     public KokosType VisitStructDecl(KokosStructDeclNode node) => throw NotAType(nameof(KokosStructDeclNode));
+    public KokosType VisitStaticVarDecl(KokosStaticVarDeclNode node) => throw NotAType(nameof(KokosStaticVarDeclNode));
     public KokosType VisitField(KokosFieldNode node) => throw NotAType(nameof(KokosFieldNode));
 }

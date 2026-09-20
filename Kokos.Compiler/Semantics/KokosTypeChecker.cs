@@ -34,6 +34,8 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
     private readonly Dictionary<KokosVarDeclNode, KokosType> _localTypes = new();
     private readonly Dictionary<KokosNode, IReadOnlyList<string>> _releasePoints = new();
     private readonly HashSet<KokosFunctionNode> _inProgress = new();
+    private readonly Dictionary<KokosStaticVarDeclNode, KokosBinding> _staticVariableBindings = new();
+    private readonly Dictionary<string, (KokosType Type, KokosOwnershipKind Ownership)> _staticVariables = new();
 
     /// <summary>Every function's resolved signature, keyed by declaration — consumed by codegen.</summary>
     public IReadOnlyDictionary<KokosFunctionNode, KokosFunctionType> FunctionTypes => _functionTypes;
@@ -54,6 +56,13 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
     public IReadOnlyDictionary<KokosVarDeclNode, KokosType> LocalTypes => _localTypes;
 
     /// <summary>
+    /// Every `static let` variable's resolved type + ownership, keyed by name — consumed by codegen to
+    /// declare one LLVM global per static and seed every function's scope with it (see
+    /// <see cref="GetStaticVariableBinding"/>/<see cref="CheckFunctionCore"/>).
+    /// </summary>
+    public IReadOnlyDictionary<string, (KokosType Type, KokosOwnershipKind Ownership)> StaticVariables => _staticVariables;
+
+    /// <summary>
     /// The compiler-inserted-release half of the move checker: at a <see cref="KokosReturnNode"/>, or
     /// at a <see cref="KokosFunctionNode"/> for the implicit fall-off-the-end path, the names of every
     /// still-whole, unconsumed `owned` binding that codegen must release right before this point.
@@ -68,10 +77,23 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         public KokosType Type { get; }
         public KokosOwnershipKind Ownership { get; }
 
-        public KokosBinding(KokosType type, KokosOwnershipKind ownership)
+        /// <summary>
+        /// True for a `static let` variable, seeded into every function's <see cref="_scope"/> — it
+        /// participates in the same move-checker machinery a local does (reads/writes, whole/partial
+        /// move tracking) but is never compiler-released at scope-end (see
+        /// <see cref="RecordReleasePoint"/>): a static persists across calls, so freeing it here would
+        /// be a use-after-free waiting to happen for the next caller. Instead, an `owned` static that's
+        /// still moved-out when the function ends is a diagnostic (see
+        /// <see cref="CheckStaticVariablesReassigned"/>) — the user must assign a fresh value back into
+        /// it before returning.
+        /// </summary>
+        public bool IsStatic { get; }
+
+        public KokosBinding(KokosType type, KokosOwnershipKind ownership, bool isStatic = false)
         {
             Type = type;
             Ownership = ownership;
+            IsStatic = isStatic;
         }
     }
 
@@ -186,6 +208,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
                 case KokosTypeAliasNode alias: _resolver.ResolveTypeAlias(alias); break;
                 case KokosEnumDeclNode enumDecl: _resolver.ResolveEnum(enumDecl); break;
                 case KokosStructDeclNode structDecl: _resolver.ResolveStruct(structDecl); break;
+                case KokosStaticVarDeclNode staticVar: VisitStaticVarDecl(staticVar); break;
             }
         }
 
@@ -193,6 +216,26 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
     }
 
     public KokosType VisitFunction(KokosFunctionNode node) => GetFunctionType(node);
+
+    public KokosType VisitStaticVarDecl(KokosStaticVarDeclNode node)
+    {
+        var binding = GetStaticVariableBinding(node);
+        _staticVariables[node.Name] = (binding.Type, binding.Ownership);
+        return binding.Type;
+    }
+
+    /// <summary>Memoized, mirroring <see cref="GetFunctionType"/> — a static's type/ownership only ever needs resolving once, however many functions reference it.</summary>
+    private KokosBinding GetStaticVariableBinding(KokosStaticVarDeclNode node)
+    {
+        if (_staticVariableBindings.TryGetValue(node, out var cached))
+            return cached;
+
+        var type = _resolver.Resolve(node.Type);
+        var ownership = KokosModifierMapper.OwnershipOf(node.Type, type, KokosOwnershipKind.Owned);
+        var binding = new KokosBinding(type, ownership, isStatic: true);
+        _staticVariableBindings[node] = binding;
+        return binding;
+    }
 
     /// <summary>
     /// Memoized + cycle-guarded, mirroring <see cref="KokosTypeResolver"/>'s named-declaration
@@ -238,6 +281,13 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         _currentReturnOwnerships = [];
         _consumed = [];
 
+        // Every static variable is visible from every function, exactly like a local already in
+        // scope — this alone is what makes it participate in the ordinary move-checker machinery
+        // (VisitIdentifier's already-moved check, MarkTransferred, reassignment clearing it) with no
+        // further special-casing there. A parameter with the same name legitimately shadows it.
+        foreach (var staticVar in _table.StaticVariables)
+            _scope[staticVar.Name] = GetStaticVariableBinding(staticVar);
+
         var parameterTypes = new List<KokosType>();
         var parameterOwnership = new List<KokosOwnershipKind>();
         foreach (var parameter in node.Parameters.Items)
@@ -280,6 +330,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
 
             CheckNoOutstandingPartialMoves(node);
             RecordReleasePoint(node);
+            CheckStaticVariablesReassigned(node.NameToken.Span);
 
             if (node.IsExported)
                 CheckCBoundarySignature(node, parameterTypes, parameterOwnership, effectiveReturnType, effectiveReturnOwnership);
@@ -358,21 +409,43 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
     }
 
     /// <summary>
-    /// Snapshots every still-whole, unconsumed `owned` binding currently in scope against
+    /// Snapshots every still-whole, unconsumed `owned` *local* binding currently in scope against
     /// <paramref name="node"/> — see <see cref="ReleasePoints"/>. Called once per return statement
     /// (after that return's own <see cref="MarkTransferred"/> call, so a returned identifier is
     /// already excluded via <see cref="_consumed"/>) and once at the end of every function body (for
-    /// the implicit fall-off-the-end path).
+    /// the implicit fall-off-the-end path). Deliberately excludes a static variable — see
+    /// <see cref="KokosBinding.IsStatic"/> and <see cref="CheckStaticVariablesReassigned"/>, its own
+    /// mirror-image check for exactly the bindings this one skips.
     /// </summary>
     private void RecordReleasePoint(KokosNode node)
     {
         var toRelease = _scope
-            .Where(entry => entry.Value.Ownership == KokosOwnershipKind.Owned && !_consumed.Contains(entry.Key))
+            .Where(entry => entry.Value.Ownership == KokosOwnershipKind.Owned && !entry.Value.IsStatic && !_consumed.Contains(entry.Key))
             .Select(entry => entry.Key)
             .ToList();
 
         if (toRelease.Count > 0)
             _releasePoints[node] = toRelease;
+    }
+
+    /// <summary>
+    /// The static-variable mirror of <see cref="RecordReleasePoint"/>: an `owned` static that's still
+    /// moved-out at this exit point is never auto-released (it isn't this function's to free — it
+    /// persists across calls), but leaving it moved-out is also not silently allowed, since the next
+    /// caller would then read a value that was already transferred away. Per spec, the user must
+    /// assign a fresh value back into it before the function returns; failing to is a diagnostic here
+    /// rather than something codegen has to paper over.
+    /// </summary>
+    private void CheckStaticVariablesReassigned(TextSpan span)
+    {
+        foreach (var (name, binding) in _scope)
+        {
+            if (binding.IsStatic && binding.Ownership == KokosOwnershipKind.Owned && _consumed.Contains(name))
+            {
+                _diagnostics.ReportError(span,
+                    $"Static variable '{name}' was moved and must be reassigned before the function returns.");
+            }
+        }
     }
 
     private KokosType InferReturnType(KokosFunctionNode node, List<KokosType> returnTypes)
@@ -519,6 +592,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         }
 
         RecordReleasePoint(node);
+        CheckStaticVariablesReassigned(node.ReturnKeyword.Span);
         return expressionType;
     }
 
@@ -675,12 +749,17 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         return isFloatingLiteral ? KokosPrimitiveType.Float : KokosPrimitiveType.Int;
     }
 
+    /// <summary>
+    /// A string literal's Kokos-visible type is exactly `unowned [Int8]` — a UTF-8 byte sequence, per
+    /// spec, with the same runtime shape as any other dynamic array so it can be passed anywhere one
+    /// is expected with zero special-casing. It's never `owned` (there's no allocation a literal's
+    /// reference could meaningfully transfer or free — it's a compile-time global) and never
+    /// `manual` (nothing should ever call `free()` on it). Codegen additionally appends a hidden
+    /// trailing `\0` to the byte buffer (not reflected in `.length`) purely so the raw pointer is
+    /// already a valid C string once converted to `unmanaged`.
+    /// </summary>
     public KokosType VisitLiteralString(KokosLiteralStringNode node) =>
-        // The spec defines no built-in string primitive (only the numeric families) — "String" is
-        // whatever a program itself declares (typically `opaque type String = [Int8];`). With no
-        // spec-given convention for anchoring a literal to a user's declared name, string literals
-        // are deliberately left unchecked rather than guessing.
-        KokosUnknownType.Instance;
+        _resolver.Intern(new KokosArrayType(KokosArrayKind.Dynamic, KokosPrimitiveType.Int8));
 
     public KokosType VisitLiteralBool(KokosLiteralBoolNode node) => KokosBoolType.Instance;
 
@@ -951,6 +1030,14 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         if (expression is KokosArrayConstructionNode)
         {
             ownership = KokosOwnershipKind.Owned;
+            return true;
+        }
+
+        // A string literal is always 'unowned' — a compile-time global, never freeable and never this
+        // reference's alone to transfer.
+        if (expression is KokosLiteralStringNode)
+        {
+            ownership = KokosOwnershipKind.Unowned;
             return true;
         }
 

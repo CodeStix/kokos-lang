@@ -17,6 +17,7 @@ public sealed class KokosTokenizer
     {
         ["function"] = TokenKind.FunctionKeyword,
         ["let"] = TokenKind.LetKeyword,
+        ["static"] = TokenKind.StaticKeyword,
         ["return"] = TokenKind.ReturnKeyword,
         ["type"] = TokenKind.TypeKeyword,
         ["opaque"] = TokenKind.OpaqueKeyword,

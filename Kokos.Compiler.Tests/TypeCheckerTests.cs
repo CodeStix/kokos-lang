@@ -1402,4 +1402,96 @@ public class TypeCheckerTests
 
         Assert.True(diagnostics.HasErrors);
     }
+
+    // --- String literals -----------------------------------------------------------------------------
+
+    [Fact]
+    public void String_literal_types_as_an_unowned_dynamic_Int8_array()
+    {
+        var (unit, _, checker, diagnostics) = Setup("""function f(): Int { return "hi".length; }""");
+        var functionType = CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+        Assert.Same(KokosPrimitiveType.Int, functionType.ReturnType);
+    }
+
+    [Fact]
+    public void String_literal_is_never_owned_so_it_cannot_be_freed()
+    {
+        var (unit, _, checker, diagnostics) = Setup("""function f() { free("hi"); }""");
+        CheckFunction(checker, unit);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    // --- Static variables ------------------------------------------------------------------------
+
+    [Fact]
+    public void Static_variable_defaults_to_owned_and_is_readable_from_a_function()
+    {
+        const string source = """
+            struct Person { age: Int }
+            static let oof: Person;
+            function f(): Int { return oof.age; }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitCompilationUnit(unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Moving_a_static_variable_without_reassigning_it_is_a_diagnostic()
+    {
+        const string source = """
+            struct Person { age: Int }
+            static let oof: Person;
+            function consume(p: owned Person): Int { return p.age; }
+            function f(): Int { return consume(oof); }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitCompilationUnit(unit);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Moving_a_static_variable_and_reassigning_it_before_returning_is_not_a_diagnostic()
+    {
+        const string source = """
+            struct Person { age: Int }
+            static let oof: Person;
+            function consume(p: owned Person): Int { return p.age; }
+            function f(): Int {
+                let result = consume(oof);
+                oof = Person(age: 0);
+                return result;
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitCompilationUnit(unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Static_variable_is_not_auto_released_at_the_end_of_a_function()
+    {
+        const string source = """
+            struct Person { age: Int }
+            static let oof: Person;
+            function f(): Int { return oof.age; }
+            """;
+
+        var (unit, table, checker, diagnostics) = Setup(source);
+        checker.VisitCompilationUnit(unit);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+
+        table.TryGetFunction("f", out var function);
+        var releasesAnything = checker.ReleasePoints.ContainsKey(function!);
+        Assert.False(releasesAnything);
+    }
 }

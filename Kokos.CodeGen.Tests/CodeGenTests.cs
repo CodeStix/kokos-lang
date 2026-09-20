@@ -22,6 +22,7 @@ public delegate long UnaryPointerToLongFunc(nint pointer);
 public delegate long BinaryLongFunc(long a, long b);
 public delegate long TernaryLongFunc(long a, long b, long c);
 public delegate sbyte BinarySByteFunc(sbyte a, sbyte b);
+public delegate sbyte NullarySByteFunc();
 public delegate double BinaryDoubleFunc(double a, double b);
 public delegate int UnaryIntFunc(int a);
 
@@ -675,5 +676,105 @@ public class CodeGenTests
         var f = jit.GetFunction<NullaryLongFunc>("f");
 
         Assert.Equal(6, f());
+    }
+
+    // --- String literals -----------------------------------------------------------------------------
+
+    [Fact]
+    public void String_literal_reports_the_correct_length_and_byte_contents()
+    {
+        using var jit = GenerateAndJit(
+            """
+            export function length(): Int {
+                let s = "hi";
+                return s.length;
+            }
+
+            export function firstByte(): Int8 {
+                let s = "hi";
+                return s[0];
+            }
+
+            export function secondByte(): Int8 {
+                let s = "hi";
+                return s[1];
+            }
+            """);
+
+        var length = jit.GetFunction<NullaryLongFunc>("length");
+        var firstByte = jit.GetFunction<NullarySByteFunc>("firstByte");
+        var secondByte = jit.GetFunction<NullarySByteFunc>("secondByte");
+
+        Assert.Equal(2, length());
+        Assert.Equal((sbyte)'h', firstByte());
+        Assert.Equal((sbyte)'i', secondByte());
+    }
+
+    [Fact]
+    public void String_literal_hidden_nul_terminator_works_with_a_real_C_function()
+    {
+        using var jit = GenerateAndJit(
+            """
+            import function strlen(str: unmanaged [Int8]): Int64;
+
+            export function f(): Int64 {
+                let s = "hello";
+                return strlen(s);
+            }
+            """);
+
+        var f = jit.GetFunction<NullaryLongFunc>("f");
+
+        Assert.Equal(5, f());
+    }
+
+    // --- Static variables --------------------------------------------------------------------------
+
+    [Fact]
+    public void Static_variable_persists_its_value_across_separate_calls()
+    {
+        using var jit = GenerateAndJit(
+            """
+            struct Person { age: Int }
+            static let oof: Person;
+
+            export function setOof(age: Int): Int {
+                oof = Person(age: age);
+                return oof.age;
+            }
+
+            export function readOof(): Int {
+                return oof.age;
+            }
+            """);
+
+        var setOof = jit.GetFunction<UnaryLongFunc>("setOof");
+        var readOof = jit.GetFunction<NullaryLongFunc>("readOof");
+
+        Assert.Equal(42, setOof(42));
+        Assert.Equal(42, readOof());
+    }
+
+    [Fact]
+    public void Static_variable_moved_out_and_reassigned_round_trips_correctly()
+    {
+        using var jit = GenerateAndJit(
+            """
+            struct Person { age: Int }
+            static let oof: Person;
+
+            function consume(p: owned Person): Int { return p.age; }
+
+            export function f(): Int {
+                oof = Person(age: 7);
+                let result = consume(oof);
+                oof = Person(age: 99);
+                return result + oof.age;
+            }
+            """);
+
+        var f = jit.GetFunction<NullaryLongFunc>("f");
+
+        Assert.Equal(106, f());
     }
 }

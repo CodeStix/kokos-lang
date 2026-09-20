@@ -45,6 +45,8 @@ public sealed class KokosFormatter : IKokosVisitor<string>
 
     public string VisitParameter(KokosParameterNode node) => $"{node.Name}: {node.Type.Accept(this)}";
 
+    public string VisitStaticVarDecl(KokosStaticVarDeclNode node) => $"static let {node.Name}: {node.Type.Accept(this)};";
+
     public string VisitTypeAlias(KokosTypeAliasNode node)
     {
         var opaque = node.OpaqueKeyword is null ? "" : "opaque ";

@@ -1,16 +1,12 @@
 
 
-struct Person { age: Int32 }
+type CString = unmanaged [Int8];
 
-import function abs(n: Int32): Int32;
-
-function readAge(p: unmanaged Person): Int32 {
-    return p.age;
-}
+import function puts(str: CString);
 
 export function main(): Int32 {
-    let ownedPerson = Person(age: 42);
-    let a = readAge(ownedPerson);
-    let b = abs(0 - 10);
-    return a + b;
+
+    puts("stijn");
+
+    return 0;
 }
