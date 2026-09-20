@@ -26,6 +26,13 @@ namespace Kokos.CodeGen;
 /// </summary>
 public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
 {
+    /// <summary>
+    /// The synthesized static-initializer function's symbol name — shared with <see cref="KokosJit.Create"/>,
+    /// which looks it up and calls it once before returning. A `.` can never appear in a Kokos
+    /// identifier, so this is guaranteed collision-free with any user-declared function.
+    /// </summary>
+    public const string StaticInitializerFunctionName = "kokos.init_statics";
+
     private readonly KokosDeclarationTable _table;
     private readonly KokosTypeChecker _checker;
     private readonly KokosLlvmTypeMapper _typeMapper;
@@ -159,6 +166,7 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     public LLVMValueRef VisitCompilationUnit(KokosCompilationUnitNode node)
     {
         DeclareStaticVariables();
+        DefineStaticInitializers();
 
         var functions = node.Members.OfType<KokosFunctionNode>().ToList();
 
@@ -184,10 +192,13 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
 
     /// <summary>
     /// One LLVM global per `static let` variable, zero-initialized (a global's initial value has to be
-    /// a compile-time constant, and "zeroed" — a null pointer for any pointer-shaped ownership, or a
-    /// recursively-zeroed aggregate — is the only one this phase produces; there's no initializer
-    /// syntax to evaluate one from). Always `internal` linkage — a static has no `export` concept of
-    /// its own, so it's never a public symbol of the module.
+    /// a compile-time constant, and "zeroed" — a null pointer for any pointer-shaped type, or a
+    /// recursively-zeroed aggregate — is the only one representable directly in the IR). A static
+    /// *with* a real initializer expression (e.g. a struct construction call, which needs a runtime
+    /// `malloc`) gets its actual value stored in by <see cref="DefineStaticInitializers"/> instead,
+    /// right after this zero-init — this method only ever produces the LLVM-level placeholder, never
+    /// the real value. Always `internal` linkage — a static has no `export` concept of its own, so it's
+    /// never a public symbol of the module.
     /// </summary>
     private void DeclareStaticVariables()
     {
@@ -199,6 +210,53 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
             global.Linkage = LLVMLinkage.LLVMInternalLinkage;
 
             _staticVariables[name] = (global, llvmType, ownership, type);
+        }
+    }
+
+    /// <summary>
+    /// A static's real initializer expression (a struct/array construction, typically — anything that
+    /// needs a runtime `malloc` can't be a compile-time-constant LLVM global initializer) is evaluated
+    /// here instead, inside one ordinary synthesized function per module, run automatically before any
+    /// other code — see <see cref="KokosJit.Create"/>, which looks this exact symbol up and calls it
+    /// once, unconditionally, right after JIT materialization. Named with a `.`, which can never appear
+    /// in a Kokos identifier, so it's guaranteed collision-free with any user-declared function.
+    /// Deliberately *not* `internal` linkage, unlike every other non-`export` function this generator
+    /// emits — `KokosJit` needs to look it up by name from outside the module. Every static still
+    /// visible to every other static's initializer (mirrors <see cref="DefineFunctionBody"/>'s own
+    /// static-seeding), so a later static's initializer really can reference an earlier one (the exact
+    /// same "earlier only" ordering the checker itself enforces — see
+    /// <see cref="KokosTypeChecker.VisitCompilationUnit"/>'s dedicated static pre-pass).
+    /// </summary>
+    private void DefineStaticInitializers()
+    {
+        var initFunction = _module.AddFunction(StaticInitializerFunctionName, LLVMTypeRef.CreateFunction(Context.VoidType, []));
+
+        var outerScope = _scope;
+        var outerFunction = _currentFunction;
+        _scope = new(_staticVariables);
+        _currentFunction = initFunction;
+
+        try
+        {
+            PositionAtEnd(initFunction.AppendBasicBlock("entry"));
+
+            foreach (var declNode in _table.StaticVariables)
+            {
+                if (declNode.Initializer is null)
+                    continue;
+
+                var (pointer, _, ownership, kokosType) = _staticVariables[declNode.Name];
+                var value = declNode.Initializer.Accept(this);
+                var converted = ConvertOwnership(value, GetOwnership(declNode.Initializer), ownership, _checker.ExpressionTypes[declNode.Initializer], kokosType);
+                _builder.BuildStore(converted, pointer);
+            }
+
+            BuildRetVoid();
+        }
+        finally
+        {
+            _scope = outerScope;
+            _currentFunction = outerFunction;
         }
     }
 
@@ -446,6 +504,18 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
             return op == TokenKind.AmpAmp ? _builder.BuildAnd(leftBool, rightBool) : _builder.BuildOr(leftBool, rightBool);
         }
 
+        // 'x == null'/'x != null': intercepted before either operand is generically evaluated, since a
+        // bare 'null' literal has no LLVM value of its own to produce in isolation (see
+        // VisitLiteralNull) — the checker already guarantees exactly one side is optional here.
+        if (op is TokenKind.EqualsEquals or TokenKind.BangEquals && (node.Left is KokosLiteralNullNode || node.Right is KokosLiteralNullNode))
+        {
+            var optionalExpr = node.Left is KokosLiteralNullNode ? node.Right : node.Left;
+            var optionalType = (KokosOptionalType)_checker.ExpressionTypes[optionalExpr];
+            var optionalValue = optionalExpr.Accept(this);
+            var isNull = ComputeIsNull(optionalValue, optionalType, GetOwnership(optionalExpr));
+            return op == TokenKind.EqualsEquals ? isNull : _builder.BuildNot(isNull, "notnull");
+        }
+
         var left = node.Left.Accept(this);
         var right = node.Right.Accept(this);
 
@@ -624,20 +694,37 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
 
     /// <summary>
     /// Converts a value from its source shape/ownership to a target position's expected shape/
-    /// ownership. Three real cases, checked in order: a fixed-length array converting to a dynamic
-    /// array (a structural, kind-level conversion — see <see cref="ConvertFixedToDynamicArray"/>, the
-    /// only case that needs both the source *and* target <see cref="KokosType"/>, since the shape
-    /// genuinely changes); `owned` (bare envelope pointer) -> `unowned`/`manual` (reference pair) is a
-    /// reborrow, reading the *allocation's current* generation and packaging it with the pointer;
-    /// `owned`/`unowned`/`manual` -> `unmanaged` strips the generation entirely (see
-    /// <see cref="StripGeneration"/>) — the C-interop conversion. Every other pairing (including
-    /// `unmanaged` -> `unmanaged`, and same-kind -> same-kind) passes the value through completely
-    /// unchanged — re-capturing a "fresh" generation on an already-non-owned pass would silently
-    /// defeat exactly the staleness detection a longer-lived reference exists to catch. `unmanaged` ->
-    /// a tracked kind never reaches here: the checker statically rejects it.
+    /// ownership. Four real cases, checked in order: implicit `T -> T?` wrapping (see below — checked
+    /// first since it can recurse back into this same function for the *inner* conversion before
+    /// wrapping); a fixed-length array converting to a dynamic array (a structural, kind-level
+    /// conversion — see <see cref="ConvertFixedToDynamicArray"/>, the only other case that needs both
+    /// the source *and* target <see cref="KokosType"/>, since the shape genuinely changes); `owned`
+    /// (bare envelope pointer) -> `unowned`/`manual` (reference pair) is a reborrow, reading the
+    /// *allocation's current* generation and packaging it with the pointer; `owned`/`unowned`/`manual`
+    /// -> `unmanaged` strips the generation entirely (see <see cref="StripGeneration"/>) — the
+    /// C-interop conversion. Every other pairing (including `unmanaged` -> `unmanaged`, and same-kind
+    /// -> same-kind) passes the value through completely unchanged — re-capturing a "fresh" generation
+    /// on an already-non-owned pass would silently defeat exactly the staleness detection a
+    /// longer-lived reference exists to catch. `unmanaged` -> a tracked kind never reaches here: the
+    /// checker statically rejects it.
     /// </summary>
     private LLVMValueRef ConvertOwnership(LLVMValueRef value, KokosOwnershipKind from, KokosOwnershipKind to, KokosType fromType, KokosType toType)
     {
+        if (toType is KokosOptionalType optionalTo && fromType is not KokosOptionalType)
+        {
+            var converted = ConvertOwnership(value, from, to, fromType, optionalTo.InnerType);
+
+            // A pointer-shaped optional reuses the inner type's own representation outright (see
+            // KokosLlvmTypeMapper.Map) — nothing to wrap, the already-converted value already *is* the
+            // right shape.
+            if (optionalTo.ReusesInnerPointer)
+                return converted;
+
+            var optionalLlvmType = _typeMapper.Map(optionalTo, to);
+            var aggregate = _builder.BuildInsertValue(optionalLlvmType.Undef, converted, 0, "opt.value");
+            return _builder.BuildInsertValue(aggregate, LLVMValueRef.CreateConstInt(Context.Int1Type, 1, false), 1, "opt.hasvalue");
+        }
+
         if (fromType is KokosArrayType { Kind: KokosArrayKind.FixedLength, IsValueType: false } fixedType
             && toType is KokosArrayType { Kind: KokosArrayKind.Dynamic } dynamicType)
         {
@@ -938,9 +1025,68 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         return _builder.BuildLoad2(_typeMapper.Map(targetType.ElementType), elementPointer, "elem");
     }
 
+    /// <summary>
+    /// The postfix null-forgiving/force-unwrap operator, <c>expr!</c> — a real runtime check, unlike
+    /// C#'s purely compile-time <c>!</c>: aborts if the target is null, otherwise produces the
+    /// unwrapped inner value. The checker already guarantees <see cref="KokosNullForgivingNode.Target"/>
+    /// resolves to a <see cref="KokosOptionalType"/> (see <see cref="KokosTypeChecker.VisitNullForgiving"/>),
+    /// so a member access/index immediately following this (`x!.field`, `x![0]`) always receives an
+    /// already-unwrapped value with no further special-casing needed in <see cref="VisitMemberAccess"/>/
+    /// <see cref="VisitIndex"/>.
+    /// </summary>
+    public LLVMValueRef VisitNullForgiving(KokosNullForgivingNode node)
+    {
+        var optionalType = (KokosOptionalType)_checker.ExpressionTypes[node.Target];
+        var value = node.Target.Accept(this);
+        var isNull = ComputeIsNull(value, optionalType, GetOwnership(node.Target));
+
+        var trapBlock = _currentFunction.AppendBasicBlock("unwrap.trap");
+        var continueBlock = _currentFunction.AppendBasicBlock("unwrap.ok");
+        BuildCondBr(isNull, trapBlock, continueBlock);
+
+        PositionAtEnd(trapBlock);
+        EmitTrap();
+
+        PositionAtEnd(continueBlock);
+        return optionalType.ReusesInnerPointer ? value : _builder.BuildExtractValue(value, 0, "unwrapped");
+    }
+
+    /// <summary>
+    /// A bare `null` literal only ever reaches codegen already concretized to a real
+    /// <see cref="KokosOptionalType"/> (see <see cref="KokosTypeChecker.VisitLiteralNull"/>'s
+    /// contextual typing) — the one context where it would stay the untyped <c>KokosNullType</c>
+    /// sentinel (`x == null`/`x != null`) is intercepted directly in <see cref="VisitMathOperator"/>
+    /// before this is ever called. A null pointer-shaped optional is just `CreateConstNull`; a
+    /// value-shaped one is `{ zeroed-T, false }` — the exact same "no value" default
+    /// <see cref="DeclareStaticVariables"/> already relies on for an uninitialized static.
+    /// </summary>
+    public LLVMValueRef VisitLiteralNull(KokosLiteralNullNode node) =>
+        LLVMValueRef.CreateConstNull(_typeMapper.Map(_checker.ExpressionTypes[node]));
+
     private LLVMValueRef ExtractPointer(LLVMValueRef referencePair) => _builder.BuildExtractValue(referencePair, 0, "ptr");
 
     private LLVMValueRef ExtractCapturedGeneration(LLVMValueRef referencePair) => _builder.BuildExtractValue(referencePair, 1, "capturedgen");
+
+    /// <summary>
+    /// The boolean "is this optional value null" check, shared by <see cref="VisitNullForgiving"/>'s
+    /// trap and the checker-approved <c>== null</c>/<c>!= null</c> comparison in
+    /// <see cref="VisitMathOperator"/>. A pointer-shaped optional reuses the inner type's own
+    /// representation (see <see cref="KokosLlvmTypeMapper.Map"/>), so "is it null" is just a pointer
+    /// comparison — extracting the pointer field first for an `unowned`/`manual` reference pair, since
+    /// that's the only shape with anything to extract. A value-shaped optional's `hasValue` flag is the
+    /// direct answer (inverted).
+    /// </summary>
+    private LLVMValueRef ComputeIsNull(LLVMValueRef value, KokosOptionalType optionalType, KokosOwnershipKind ownership)
+    {
+        if (optionalType.ReusesInnerPointer)
+        {
+            var pointer = ownership is KokosOwnershipKind.Unowned or KokosOwnershipKind.Manual ? ExtractPointer(value) : value;
+            return _builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, pointer, LLVMValueRef.CreateConstNull(pointer.TypeOf), "isnull");
+        }
+
+        var hasValue = _builder.BuildExtractValue(value, 1, "hasvalue");
+        return _builder.BuildNot(hasValue, "isnull");
+    }
 
     /// <summary>
     /// The "every dereference is runtime-checked" guarantee: given an `unowned`/`manual` reference

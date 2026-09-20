@@ -1883,7 +1883,7 @@ public class TypeCheckerTests
     {
         const string source = """
             struct Person { age: Int }
-            static let oof: Person;
+            static let oof: Person = Person(age: 0);
             function f(): Int { return oof.age; }
             """;
 
@@ -1898,7 +1898,7 @@ public class TypeCheckerTests
     {
         const string source = """
             struct Person { age: Int }
-            static let oof: Person;
+            static let oof: Person = Person(age: 0);
             function consume(p: owned Person): Int { return p.age; }
             function f(): Int { return consume(oof); }
             """;
@@ -1914,7 +1914,7 @@ public class TypeCheckerTests
     {
         const string source = """
             struct Person { age: Int }
-            static let oof: Person;
+            static let oof: Person = Person(age: 0);
             function consume(p: owned Person): Int { return p.age; }
             function f(): Int {
                 let result = consume(oof);
@@ -1934,7 +1934,7 @@ public class TypeCheckerTests
     {
         const string source = """
             struct Person { age: Int }
-            static let oof: Person;
+            static let oof: Person = Person(age: 0);
             function f(): Int { return oof.age; }
             """;
 
@@ -1945,5 +1945,205 @@ public class TypeCheckerTests
         table.TryGetFunction("f", out var function);
         var releasesAnything = checker.ReleasePoints.ContainsKey(function!);
         Assert.False(releasesAnything);
+    }
+
+    // --- Optional values (`T?`) ------------------------------------------------------------------
+
+    [Fact]
+    public void A_non_optional_pointer_shaped_static_with_no_initializer_is_a_diagnostic()
+    {
+        // The exact reported bug: this used to silently null-initialize and crash the first time
+        // 'main' read a field off it.
+        const string source = """
+            struct Person { age: Int }
+            static let person: Person;
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitCompilationUnit(unit);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void A_non_optional_pointer_shaped_static_with_an_initializer_is_not_a_diagnostic()
+    {
+        const string source = """
+            struct Person { age: Int }
+            static let person: Person = Person(age: 100);
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitCompilationUnit(unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void An_optional_static_with_no_initializer_is_not_a_diagnostic()
+    {
+        const string source = """
+            struct Person { age: Int }
+            static let maybePerson: Person?;
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitCompilationUnit(unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void A_value_shaped_non_optional_static_with_no_initializer_is_not_a_diagnostic()
+    {
+        // Only pointer-shaped null is the actual crash risk this phase closes — an implicit 0 for a
+        // plain Int is a normal, unsurprising default.
+        var (unit, _, checker, diagnostics) = Setup("static let count: Int;");
+        checker.VisitCompilationUnit(unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Directly_accessing_a_field_through_an_optional_is_a_diagnostic()
+    {
+        const string source = """
+            struct Person { age: Int }
+            function f(p: Person?): Int { return p.age; }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        CheckFunction(checker, unit, memberIndex: 1);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Directly_indexing_an_optional_array_is_a_diagnostic()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f(arr: [Int]?): Int { return arr[0]; }");
+        CheckFunction(checker, unit);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Force_unwrapping_before_a_field_access_is_not_a_diagnostic()
+    {
+        const string source = """
+            struct Person { age: Int }
+            function f(p: Person?): Int { return p!.age; }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        CheckFunction(checker, unit, memberIndex: 1);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Force_unwrapping_an_already_non_optional_value_is_a_diagnostic()
+    {
+        const string source = """
+            struct Person { age: Int }
+            function f(p: Person): Int { return p!.age; }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        CheckFunction(checker, unit, memberIndex: 1);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Null_is_assignable_into_an_optional_let_parameter_return_and_field()
+    {
+        const string source = """
+            struct Person { age: Int, pet: Person? }
+            function borrow(p: Person?) { }
+            function f(): Person? {
+                let a: Person? = null;
+                borrow(null);
+                let b = Person(age: 1, pet: null);
+                return null;
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[1]);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[2]);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Null_is_rejected_into_a_non_optional_let()
+    {
+        const string source = """
+            struct Person { age: Int }
+            function f() { let p: Person = null; }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        CheckFunction(checker, unit, memberIndex: 1);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void A_bare_let_initialized_from_null_with_no_annotation_is_a_diagnostic()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f() { let x = null; }");
+        CheckFunction(checker, unit);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Comparing_an_optional_against_null_type_checks_as_bool_on_either_side()
+    {
+        const string source = """
+            struct Person { age: Int }
+            function f(p: Person?): Bool { return p == null; }
+            function g(p: Person?): Bool { return null != p; }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        CheckFunction(checker, unit, memberIndex: 1);
+        CheckFunction(checker, unit, memberIndex: 2);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void A_static_initializer_can_reference_an_earlier_static()
+    {
+        const string source = """
+            struct Person { age: Int }
+            static let a: Person = Person(age: 1);
+            static let b: Person = a;
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitCompilationUnit(unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void A_static_initializer_referencing_a_later_static_is_a_diagnostic()
+    {
+        // Documented ordering limitation, not a soundness issue — 'b' isn't seeded into scope yet
+        // when 'a''s initializer is checked.
+        const string source = """
+            struct Person { age: Int }
+            static let a: Person = b;
+            static let b: Person = Person(age: 1);
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitCompilationUnit(unit);
+
+        Assert.True(diagnostics.HasErrors);
     }
 }

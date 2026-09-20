@@ -30,6 +30,8 @@ public interface IKokosVisitor<out T>
     T VisitLiteralNumber(KokosLiteralNumberNode node);
     T VisitLiteralString(KokosLiteralStringNode node);
     T VisitLiteralBool(KokosLiteralBoolNode node);
+    T VisitLiteralNull(KokosLiteralNullNode node);
+    T VisitNullForgiving(KokosNullForgivingNode node);
     T VisitConditionalExpression(KokosConditionalExpressionNode node);
     T VisitMathOperator(KokosMathOperatorNode node);
     T VisitUnaryOperator(KokosUnaryOperatorNode node);

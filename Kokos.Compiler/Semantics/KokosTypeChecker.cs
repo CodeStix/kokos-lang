@@ -234,6 +234,10 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         if (from is KokosUnknownType or KokosErrorType) return true;
         if (to is KokosUnknownType or KokosErrorType) return true;
         if (ReferenceEquals(from, to)) return true;
+        // Checked before the general Optional-unwrapping case below: 'null' is assignable only into
+        // an optional target, never into the unwrapped inner type — the recursive unwrap below would
+        // otherwise compare 'null' against the *inner* (non-optional) type instead and wrongly reject it.
+        if (from is KokosNullType) return to is KokosOptionalType;
         if (to is KokosOptionalType optionalTo) return IsAssignable(from, optionalTo.InnerType);
         if (to is KokosUnionType unionTo) return unionTo.Members.Any(member => IsAssignable(from, member));
 
@@ -255,6 +259,18 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
 
     public KokosType VisitCompilationUnit(KokosCompilationUnitNode node)
     {
+        // Every static is fully resolved — including checking its initializer expression, which
+        // touches _scope — in one dedicated pass *before* any function is checked. Static variable
+        // resolution used to be pure structural lookup (never touched _scope), so it was harmless for
+        // CheckFunctionCore's own static-seeding loop to trigger it lazily, mid-function, in file
+        // order; initializer-checking breaks that assumption, so this pass exists specifically to
+        // guarantee every static is memoized (and, for a later static's initializer, every earlier
+        // one already seeded into _scope — see the loop below) before any function-scoped checking
+        // begins. A static's initializer may therefore only reference an *earlier* static in file
+        // order, not a later one — a documented ordering limitation, not a soundness issue.
+        foreach (var staticVar in node.Members.OfType<KokosStaticVarDeclNode>())
+            _scope[staticVar.Name] = GetStaticVariableBinding(staticVar);
+
         foreach (var member in node.Members)
         {
             switch (member)
@@ -279,7 +295,13 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         return binding.Type;
     }
 
-    /// <summary>Memoized, mirroring <see cref="GetFunctionType"/> — a static's type/ownership only ever needs resolving once, however many functions reference it.</summary>
+    /// <summary>
+    /// Memoized, mirroring <see cref="GetFunctionType"/> — a static's type/ownership/initializer only
+    /// ever needs resolving once, however many functions reference it (see
+    /// <see cref="VisitCompilationUnit"/>'s dedicated pre-pass, which is what makes calling this
+    /// *during* the initializer check below, for an earlier static referenced from a later one's
+    /// initializer, safe — it's always already memoized by then).
+    /// </summary>
     private KokosBinding GetStaticVariableBinding(KokosStaticVarDeclNode node)
     {
         if (_staticVariableBindings.TryGetValue(node, out var cached))
@@ -288,6 +310,32 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         var type = _resolver.Resolve(node.Type);
         var ownership = KokosModifierMapper.OwnershipOf(node.Type, type, KokosOwnershipKind.Owned, _table);
         var isReadOnly = KokosModifierMapper.IsReadOnlyOf(node.Type, _table);
+
+        if (node.Initializer is not null)
+        {
+            var initializerType = CheckExpression(node.Initializer, type);
+            if (!IsAssignable(initializerType, type))
+            {
+                _diagnostics.ReportError(node.NameToken.Span,
+                    $"Cannot assign a value of type '{initializerType.DisplayName}' to '{node.Name}' of type '{type.DisplayName}'.");
+            }
+
+            if (ownership is KokosOwnershipKind.Owned or KokosOwnershipKind.Unowned or KokosOwnershipKind.Manual
+                && TryGetOwnership(node.Initializer, out var sourceOwnership) && sourceOwnership == KokosOwnershipKind.Unmanaged)
+            {
+                _diagnostics.ReportError(node.NameToken.Span,
+                    "Cannot use an 'unmanaged' reference where a tracked owned/unowned/manual reference is expected.");
+            }
+
+            CheckNoLeakingWeakening(node.Initializer, ownership, node.NameToken.Span, "This initializer");
+            CheckNoReadOnlyNarrowing(node.Initializer, ownership, isReadOnly, node.NameToken.Span, "This initializer");
+        }
+        else if (type.IsPointerShaped && type is not KokosOptionalType)
+        {
+            _diagnostics.ReportError(node.NameToken.Span,
+                $"Static variable '{node.Name}' requires an initializer because '{type.DisplayName}' can't be null.");
+        }
+
         var binding = new KokosBinding(type, ownership, isStatic: true, isReadOnly: isReadOnly);
         _staticVariableBindings[node] = binding;
         return binding;
@@ -602,6 +650,13 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         var expected = node.Type is null ? null : _resolver.Resolve(node.Type);
         var initializerType = CheckExpression(node.Initializer, expected);
 
+        if (expected is null && initializerType is KokosNullType)
+        {
+            _diagnostics.ReportError(node.NameToken.Span,
+                $"Cannot infer a type for '{node.Name}' from 'null' alone; add an explicit type annotation.");
+            initializerType = KokosErrorType.Instance;
+        }
+
         if (expected is not null && !IsAssignable(initializerType, expected))
         {
             _diagnostics.ReportError(node.NameToken.Span,
@@ -668,6 +723,13 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         }
         else
         {
+            if (expressionType is KokosNullType)
+            {
+                _diagnostics.ReportError(node.ReturnKeyword.Span,
+                    "Cannot infer a return type from 'null' alone; add an explicit return type annotation.");
+                expressionType = KokosErrorType.Instance;
+            }
+
             _currentReturnTypes.Add(expressionType);
         }
 
@@ -872,6 +934,17 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
 
     public KokosType VisitLiteralBool(KokosLiteralBoolNode node) => KokosBoolType.Instance;
 
+    /// <summary>
+    /// Contextual typing, exactly mirroring <see cref="VisitLiteralNumber"/>'s "adapt to the ambient
+    /// expected type" mechanism: a bare `null` written where a concrete `T?` is already expected (a
+    /// `let`/parameter/field/return/static's declared type) takes on that exact optional type directly.
+    /// With no expected type at all (e.g. compared directly: `x == null`), it stays the sentinel
+    /// <see cref="KokosNullType"/> — meaningful only to the equality-operand check in
+    /// <see cref="VisitMathOperator"/> and to <see cref="IsAssignable"/>, never a real declared type.
+    /// </summary>
+    public KokosType VisitLiteralNull(KokosLiteralNullNode node) =>
+        _expectedType is KokosOptionalType expectedOptional ? expectedOptional : KokosNullType.Instance;
+
     public KokosType VisitMathOperator(KokosMathOperatorNode node)
     {
         var left = TypeOf(node.Left);
@@ -893,10 +966,14 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             return KokosErrorType.Instance;
         }
 
-        // Equality accepts any two same-typed operands — numeric or Bool.
+        // Equality accepts any two same-typed operands (numeric or Bool), or an optional compared
+        // directly against the 'null' literal on either side.
         if (EqualityOperators.Contains(op))
         {
             if ((left is KokosPrimitiveType or KokosBoolType) && ReferenceEquals(left, right))
+                return KokosBoolType.Instance;
+
+            if ((left is KokosOptionalType && right is KokosNullType) || (left is KokosNullType && right is KokosOptionalType))
                 return KokosBoolType.Instance;
 
             ReportOperatorMismatch(node, left, right);
@@ -1074,6 +1151,12 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         if (targetType is KokosUnknownType or KokosErrorType)
             return KokosUnknownType.Instance;
 
+        if (targetType is KokosOptionalType)
+        {
+            _diagnostics.ReportError(SpanOf(node.Target), $"'{targetType.DisplayName}' may be null — use '!' to force-unwrap it first.");
+            return KokosErrorType.Instance;
+        }
+
         if (targetType is not KokosArrayType arrayType)
         {
             _diagnostics.ReportError(SpanOf(node.Target), $"Cannot index into a value of type '{targetType.DisplayName}'.");
@@ -1081,6 +1164,27 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         }
 
         return arrayType.ElementType;
+    }
+
+    /// <summary>
+    /// The postfix null-forgiving/force-unwrap operator, <c>expr!</c>: requires the target to actually
+    /// be optional (there's no null state to check otherwise — a runtime null-check on an already
+    /// non-optional value is meaningless, unlike C#'s purely compile-time <c>!</c>) and produces the
+    /// unwrapped inner type. The actual runtime check (abort on null) is <see cref="KokosCodeGenerator.VisitNullForgiving"/>'s job, in Kokos.CodeGen.
+    /// </summary>
+    public KokosType VisitNullForgiving(KokosNullForgivingNode node)
+    {
+        var targetType = TypeOf(node.Target);
+
+        if (targetType is KokosOptionalType optionalType)
+            return optionalType.InnerType;
+
+        if (targetType is KokosUnknownType or KokosErrorType)
+            return targetType;
+
+        _diagnostics.ReportError(node.BangToken.Span,
+            $"'!' can only be used on an optional value, but '{targetType.DisplayName}' isn't optional.");
+        return KokosErrorType.Instance;
     }
 
     /// <summary>The by-name-or-ordinal field lookup shared by every place that resolves a struct member access.</summary>
@@ -1102,6 +1206,8 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         KokosIdentifierNode identifier => _scope.ContainsKey(identifier.Name),
         KokosMemberAccessNode access => IsStorageBacked(access.Target),
         KokosIndexNode index => IsStorageBacked(index.Target),
+        // '!' only adds a runtime null-check — it doesn't change what's underneath it.
+        KokosNullForgivingNode nullForgiving => IsStorageBacked(nullForgiving.Target),
         _ => false,
     };
 
@@ -1176,6 +1282,9 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
 
         KokosCallNode { Callee: KokosIdentifierNode fnName } when _table.TryGetFunction(fnName.Name, out var fnDecl) =>
             GetFunctionType(fnDecl).ReturnReadOnly,
+
+        // '!' only adds a runtime null-check — it doesn't change readonly-ness.
+        KokosNullForgivingNode nullForgiving => TryGetReadOnly(nullForgiving.Target),
 
         _ => false,
     };
@@ -1266,6 +1375,10 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             ownership = KokosOwnershipKind.Unowned;
             return true;
         }
+
+        // '!' only adds a runtime null-check — it doesn't change what's underneath it.
+        if (expression is KokosNullForgivingNode nullForgiving)
+            return TryGetOwnership(nullForgiving.Target, out ownership);
 
         ownership = KokosOwnershipKind.Inferred;
         return false;
@@ -1397,6 +1510,12 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
 
         if (targetType is KokosUnknownType or KokosErrorType)
             return KokosUnknownType.Instance;
+
+        if (targetType is KokosOptionalType)
+        {
+            _diagnostics.ReportError(node.NameToken.Span, $"'{targetType.DisplayName}' may be null — use '!' to force-unwrap it first.");
+            return KokosErrorType.Instance;
+        }
 
         if (targetType is KokosStructType structType)
         {

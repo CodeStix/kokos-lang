@@ -424,4 +424,42 @@ public class FormatterTests
             """,
             KokosFormatter.Format(unit));
     }
+
+    [Fact]
+    public void Formats_the_null_literal_and_force_unwrap_operator()
+    {
+        var unit = KokosParser.Parse(
+            "function f(p: Person?): Int { return p ! . age ; }", out var diagnostics);
+        Assert.False(diagnostics.HasErrors);
+
+        Assert.Equal(
+            """
+            function f(p: Person?): Int {
+                return p!.age;
+            }
+
+            """,
+            KokosFormatter.Format(unit));
+    }
+
+    [Fact]
+    public void Formats_a_static_variable_with_and_without_an_initializer()
+    {
+        var unit = KokosParser.Parse(
+            """
+            static let a: Person = Person(age: 1);
+            static let b: Person?;
+            """,
+            out var diagnostics);
+        Assert.False(diagnostics.HasErrors);
+
+        Assert.Equal(
+            """
+            static let a: Person = Person(age: 1);
+
+            static let b: Person?;
+
+            """,
+            KokosFormatter.Format(unit));
+    }
 }

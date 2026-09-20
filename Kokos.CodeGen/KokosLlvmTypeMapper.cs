@@ -8,8 +8,10 @@ namespace Kokos.CodeGen;
 /// the *only* place this decision lives, so retargeting word size or adding a new primitive kind
 /// stays a one-file change.
 ///
-/// Enums/optionals/unions still have no chosen representation, so mapping them is left unimplemented
-/// here rather than guessed at now. Structs (and tuples, which the semantic layer already models as a
+/// Enums/unions still have no chosen representation, so mapping them is left unimplemented here rather
+/// than guessed at now; optionals are real as of the optional-values phase (see
+/// <see cref="Map(KokosType, KokosOwnershipKind)"/>'s `KokosOptionalType` arms). Structs (and tuples,
+/// which the semantic layer already models as a
 /// <see cref="KokosStructType"/> with a null <see cref="KokosStructType.Name"/>) are real as of Phase
 /// F. As of Phase G, a reference struct's representation also depends on *ownership*, not just its
 /// structural type — see <see cref="Map(KokosType, KokosOwnershipKind)"/>. As of the C-interop phase,
@@ -74,9 +76,17 @@ public sealed class KokosLlvmTypeMapper
 
         KokosArrayType arrayType => LLVMTypeRef.CreatePointer(MapEnvelope(arrayType), 0),
 
+        // A pointer-shaped optional (`Person?`, `[Int8]?`) reuses the inner type's own representation
+        // outright — null already means "no value," no extra bit needed. A value-shaped optional
+        // (`Int?`) has no spare bit pattern to repurpose, so it becomes `{ T value, i1 hasValue }`.
+        // Either way, LLVMValueRef.CreateConstNull on the result already produces exactly the right
+        // "no value" default (a null pointer, or `{zeroed-T, false}`) with zero further special-casing.
+        KokosOptionalType optionalType when optionalType.ReusesInnerPointer => Map(optionalType.InnerType, ownership),
+        KokosOptionalType optionalType => _context.GetStructType([Map(optionalType.InnerType, ownership), _context.Int1Type], Packed: false),
+
         _ => throw new NotSupportedException(
             $"{type.GetType().Name} ('{type.DisplayName}') has no LLVM representation yet — " +
-            "enums/optionals/unions still need a chosen representation."),
+            "enums/unions still need a chosen representation."),
     };
 
     /// <summary>

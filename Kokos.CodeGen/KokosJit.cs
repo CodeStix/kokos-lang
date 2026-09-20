@@ -24,6 +24,12 @@ public sealed unsafe class KokosJit : IDisposable
     /// Takes ownership of <paramref name="module"/> and <paramref name="context"/> — per ORC v2's
     /// usual ownership rules, once a module is wrapped as a thread-safe module and handed to the
     /// JIT, the JIT owns it. Neither should be disposed by the caller afterward.
+    ///
+    /// Runs the module's static-variable initializers (<see cref="KokosCodeGenerator.StaticInitializerFunctionName"/>)
+    /// exactly once, right here, before returning — every module always has this function (an empty
+    /// <c>{ ret void }</c> when there are no `static let` initializers at all), so this is always safe
+    /// and needs no cooperation from any caller: static initialization now unconditionally happens
+    /// before any other compiled function can possibly run.
     /// </summary>
     public static KokosJit Create(LLVMModuleRef module, LLVMContextRef context)
     {
@@ -40,6 +46,10 @@ public sealed unsafe class KokosJit : IDisposable
         ThrowIfError(addError, "adding the generated module to the LLJIT");
 
         AddProcessSymbolGenerator(jit.MainJITDylib);
+
+        var initLookupError = jit.Lookup(out var initAddress, KokosCodeGenerator.StaticInitializerFunctionName);
+        ThrowIfError(initLookupError, $"looking up '{KokosCodeGenerator.StaticInitializerFunctionName}'");
+        Marshal.GetDelegateForFunctionPointer<Action>(new IntPtr(unchecked((long)initAddress)))();
 
         return new KokosJit(jit);
     }

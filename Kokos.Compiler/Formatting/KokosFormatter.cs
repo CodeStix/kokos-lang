@@ -45,7 +45,11 @@ public sealed class KokosFormatter : IKokosVisitor<string>
 
     public string VisitParameter(KokosParameterNode node) => $"{node.Name}: {node.Type.Accept(this)}";
 
-    public string VisitStaticVarDecl(KokosStaticVarDeclNode node) => $"static let {node.Name}: {node.Type.Accept(this)};";
+    public string VisitStaticVarDecl(KokosStaticVarDeclNode node)
+    {
+        var initializer = node.Initializer is null ? "" : $" = {node.Initializer.Accept(this)}";
+        return $"static let {node.Name}: {node.Type.Accept(this)}{initializer};";
+    }
 
     public string VisitTypeAlias(KokosTypeAliasNode node)
     {
@@ -174,6 +178,8 @@ public sealed class KokosFormatter : IKokosVisitor<string>
 
     public string VisitLiteralString(KokosLiteralStringNode node) => node.Token.Text;
 
+    public string VisitLiteralNull(KokosLiteralNullNode node) => "null";
+
     public string VisitMathOperator(KokosMathOperatorNode node) =>
         $"{node.Left.Accept(this)} {node.OperatorToken.Text} {node.Right.Accept(this)}";
 
@@ -206,4 +212,6 @@ public sealed class KokosFormatter : IKokosVisitor<string>
         $"[{node.Value.Accept(this)} # {node.Length.Accept(this)}]";
 
     public string VisitIndex(KokosIndexNode node) => $"{node.Target.Accept(this)}[{node.Index.Accept(this)}]";
+
+    public string VisitNullForgiving(KokosNullForgivingNode node) => $"{node.Target.Accept(this)}!";
 }

@@ -25,6 +25,7 @@ public enum TokenKind
     ThenKeyword,
     TrueKeyword,
     FalseKeyword,
+    NullKeyword,
     OwnedKeyword,
     UnownedKeyword,
     ManualKeyword,

@@ -613,4 +613,58 @@ public class ParserTests
         var operand = Assert.IsType<KokosIdentifierNode>(freeStatement.Operand);
         Assert.Equal("m", operand.Name);
     }
+
+    [Fact]
+    public void Parses_the_null_literal()
+    {
+        var unit = KokosParser.Parse("function f(): Person? { return null; }", out var diagnostics);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+
+        var returnStatement = Assert.IsType<KokosReturnNode>(unit.Functions[0].Body!.Statements[0]);
+        Assert.IsType<KokosLiteralNullNode>(returnStatement.Expression);
+    }
+
+    [Fact]
+    public void Parses_postfix_force_unwrap_before_a_member_access()
+    {
+        // 'p!.age' must parse as MemberAccess(NullForgiving(p), age) — the '!' binds tighter, to 'p'
+        // alone, not to the whole 'p.age'.
+        var unit = KokosParser.Parse("function f(p: Person?): Int { return p!.age; }", out var diagnostics);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+
+        var returnStatement = Assert.IsType<KokosReturnNode>(unit.Functions[0].Body!.Statements[0]);
+        var memberAccess = Assert.IsType<KokosMemberAccessNode>(returnStatement.Expression);
+        var nullForgiving = Assert.IsType<KokosNullForgivingNode>(memberAccess.Target);
+        var target = Assert.IsType<KokosIdentifierNode>(nullForgiving.Target);
+        Assert.Equal("p", target.Name);
+    }
+
+    [Fact]
+    public void Postfix_force_unwrap_does_not_collide_with_logical_not_or_not_equal()
+    {
+        var unit = KokosParser.Parse(
+            "function f(p: Person?, flag: Bool): Bool { return !flag && p != null; }", out var diagnostics);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Parses_a_static_variable_with_an_initializer()
+    {
+        var unit = KokosParser.Parse("static let x: Person = Person(age: 1);", out var diagnostics);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+
+        var staticVar = Assert.IsType<KokosStaticVarDeclNode>(unit.Members[0]);
+        Assert.NotNull(staticVar.Initializer);
+        Assert.IsType<KokosCallNode>(staticVar.Initializer);
+    }
+
+    [Fact]
+    public void Parses_a_static_variable_without_an_initializer()
+    {
+        var unit = KokosParser.Parse("static let x: Person?;", out var diagnostics);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+
+        var staticVar = Assert.IsType<KokosStaticVarDeclNode>(unit.Members[0]);
+        Assert.Null(staticVar.Initializer);
+    }
 }

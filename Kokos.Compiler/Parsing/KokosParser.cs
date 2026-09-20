@@ -90,8 +90,17 @@ public sealed class KokosParser
         var name = Expect(TokenKind.Identifier, "a variable name");
         var colon = Expect(TokenKind.Colon, "':'");
         var type = ParseType();
+
+        KokosToken? equals = null;
+        KokosExpressionNode? initializer = null;
+        if (Current.Kind == TokenKind.Equals)
+        {
+            equals = Advance();
+            initializer = ParseExpression();
+        }
+
         var semicolon = Expect(TokenKind.Semicolon, "';'");
-        return new KokosStaticVarDeclNode(staticKeyword, letKeyword, name, colon, type, semicolon);
+        return new KokosStaticVarDeclNode(staticKeyword, letKeyword, name, colon, type, equals, initializer, semicolon);
     }
 
     /// <summary>
@@ -548,6 +557,13 @@ public sealed class KokosParser
                 var closeBracket = Expect(TokenKind.CloseBracket, "']'");
                 expression = new KokosIndexNode(expression, openBracket, index, closeBracket);
             }
+            else if (Current.Kind == TokenKind.Bang)
+            {
+                // Postfix, unlike ParseUnary's leading '!' (logical not) — only reachable once a
+                // primary expression is already parsed, so 'x!' (force-unwrap) and '!x' (not) never
+                // collide, and '!=' is already its own BangEquals token from the tokenizer.
+                expression = new KokosNullForgivingNode(expression, Advance());
+            }
             else
             {
                 break;
@@ -585,6 +601,9 @@ public sealed class KokosParser
 
             case TokenKind.FalseKeyword:
                 return new KokosLiteralBoolNode(Advance(), false);
+
+            case TokenKind.NullKeyword:
+                return new KokosLiteralNullNode(Advance());
 
             case TokenKind.OpenParen:
             {

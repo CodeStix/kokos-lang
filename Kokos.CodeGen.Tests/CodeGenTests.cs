@@ -26,6 +26,12 @@ public delegate sbyte NullarySByteFunc();
 public delegate double BinaryDoubleFunc(double a, double b);
 public delegate int UnaryIntFunc(int a);
 
+// Not 'bool': .NET's default bool marshalling reads a full 4-byte "Win32 BOOL" from the return
+// register, but LLVM only guarantees the low byte (AL) is meaningful for an i1 return — the upper
+// bits are otherwise unspecified. Reading a 'byte' instead only ever looks at AL, which is exactly
+// what LLVM actually writes 0/1 into.
+public delegate byte NullaryByteFunc();
+
 public class CodeGenTests
 {
     private static KokosJit GenerateAndJit(string source)
@@ -759,7 +765,7 @@ public class CodeGenTests
         using var jit = GenerateAndJit(
             """
             struct Person { age: Int }
-            static let oof: Person;
+            static let oof: Person = Person(age: 0);
 
             export function setOof(age: Int): Int {
                 oof = Person(age: age);
@@ -784,7 +790,7 @@ public class CodeGenTests
         using var jit = GenerateAndJit(
             """
             struct Person { age: Int }
-            static let oof: Person;
+            static let oof: Person = Person(age: 0);
 
             function consume(p: owned Person): Int { return p.age; }
 
@@ -799,5 +805,121 @@ public class CodeGenTests
         var f = jit.GetFunction<NullaryLongFunc>("f");
 
         Assert.Equal(106, f());
+    }
+
+    // --- Optional values (`T?`) --------------------------------------------------------------------
+
+    [Fact]
+    public void The_fixed_reported_repro_runs_end_to_end()
+    {
+        // The exact reported bug, fixed: giving the static an initializer instead of relying on
+        // implicit (crashing) null.
+        using var jit = GenerateAndJit(
+            """
+            struct Person { age: Int }
+            static let person: Person = Person(age: 100);
+
+            export function main(): Int { return person.age; }
+            """);
+
+        var main = jit.GetFunction<NullaryLongFunc>("main");
+
+        Assert.Equal(100, main());
+    }
+
+    [Fact]
+    public void Force_unwrapping_a_non_null_pointer_shaped_optional_returns_the_value()
+    {
+        using var jit = GenerateAndJit(
+            """
+            struct Person { age: Int }
+            static let maybePerson: Person? = Person(age: 7);
+
+            export function main(): Int { return maybePerson!.age; }
+            """);
+
+        var main = jit.GetFunction<NullaryLongFunc>("main");
+
+        Assert.Equal(7, main());
+    }
+
+    [Fact]
+    public void A_value_shaped_optional_round_trips_construction_assignment_and_unwrap()
+    {
+        using var jit = GenerateAndJit(
+            """
+            static let maybeAge: Int?;
+
+            export function main(): Int {
+                maybeAge = 42;
+                return maybeAge! + 1;
+            }
+            """);
+
+        var main = jit.GetFunction<NullaryLongFunc>("main");
+
+        Assert.Equal(43, main());
+    }
+
+    [Fact]
+    public void Comparing_a_null_pointer_shaped_optional_against_null_is_true()
+    {
+        using var jit = GenerateAndJit(
+            """
+            struct Person { age: Int }
+            static let maybePerson: Person?;
+
+            export function isNull(): Bool { return maybePerson == null; }
+            export function isNotNull(): Bool { return maybePerson != null; }
+            """);
+
+        Assert.Equal(1, jit.GetFunction<NullaryByteFunc>("isNull")());
+        Assert.Equal(0, jit.GetFunction<NullaryByteFunc>("isNotNull")());
+    }
+
+    [Fact]
+    public void Comparing_a_non_null_pointer_shaped_optional_against_null_is_false()
+    {
+        using var jit = GenerateAndJit(
+            """
+            struct Person { age: Int }
+            static let maybePerson: Person? = Person(age: 1);
+
+            export function isNull(): Bool { return maybePerson == null; }
+            export function isNotNull(): Bool { return maybePerson != null; }
+            """);
+
+        Assert.Equal(0, jit.GetFunction<NullaryByteFunc>("isNull")());
+        Assert.Equal(1, jit.GetFunction<NullaryByteFunc>("isNotNull")());
+    }
+
+    [Fact]
+    public void Comparing_a_value_shaped_optional_against_null_reflects_its_hasValue_flag()
+    {
+        using var jit = GenerateAndJit(
+            """
+            static let maybeAge: Int?;
+
+            export function isNullBeforeSet(): Bool { return maybeAge == null; }
+            """);
+
+        Assert.Equal(1, jit.GetFunction<NullaryByteFunc>("isNullBeforeSet")());
+    }
+
+    [Fact]
+    public void A_static_initializer_referencing_an_earlier_static_round_trips_correctly()
+    {
+        using var jit = GenerateAndJit(
+            """
+            struct Person { age: Int }
+            static let a: Person = Person(age: 5);
+            static let b: Person = a;
+
+            export function main(): Int { return b.age; }
+            """);
+
+        var main = jit.GetFunction<NullaryLongFunc>("main");
+
+        Assert.Equal(5, main());
     }
 }
