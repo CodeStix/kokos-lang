@@ -32,7 +32,6 @@ public class TokenizerTests
     [InlineData("enum")]
     [InlineData("struct")]
     [InlineData("value")]
-    [InlineData("terminated")]
     [InlineData("if")]
     [InlineData("else")]
     [InlineData("while")]

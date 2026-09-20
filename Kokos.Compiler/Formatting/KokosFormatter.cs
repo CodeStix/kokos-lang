@@ -86,9 +86,6 @@ public sealed class KokosFormatter : IKokosVisitor<string>
     public string VisitFixedLengthArrayType(KokosFixedLengthArrayTypeNode node) =>
         $"{(node.ValueKeyword is null ? "" : "value ")}[{node.ElementType.Accept(this)} # {node.SizeToken.Text}]";
 
-    public string VisitTerminatedArrayType(KokosTerminatedArrayTypeNode node) =>
-        $"terminated [{node.ElementType.Accept(this)}]";
-
     public string VisitOptionalType(KokosOptionalTypeNode node) => $"{node.InnerType.Accept(this)}?";
 
     // No spaces around '|', matching the spec's own union examples (e.g. `Person|Fruit`).

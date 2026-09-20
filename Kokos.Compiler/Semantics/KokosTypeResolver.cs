@@ -169,15 +169,6 @@ public sealed class KokosTypeResolver : IKokosVisitor<KokosType>
             var type = Resolve(fieldNode.Type);
             var ownership = KokosModifierMapper.OwnershipOf(fieldNode.Type, type, KokosOwnershipKind.Owned);
 
-            // A terminated array exists purely for C-string interop — the pointer is never Kokos's own
-            // allocation to generation-track, so it stays 'unmanaged'-only. Dynamic/fixed-length
-            // arrays now get the same real ownership defaulting a struct field already gets.
-            if (type is KokosArrayType { Kind: KokosArrayKind.Terminated } && ownership != KokosOwnershipKind.Unmanaged)
-            {
-                _diagnostics.ReportError(fieldNode.Type.GetTokens().First().Span,
-                    "A 'terminated' array is only supported as 'unmanaged'; annotate this field with 'unmanaged'.");
-            }
-
             fields.Add(new KokosStructField(fieldNode.Name, fieldNode.IndexToken is not null, i, type, ownership));
         }
 
@@ -259,9 +250,6 @@ public sealed class KokosTypeResolver : IKokosVisitor<KokosType>
         return Intern(new KokosArrayType(KokosArrayKind.FixedLength, elementType, length, node.ValueKeyword is not null));
     }
 
-    public KokosType VisitTerminatedArrayType(KokosTerminatedArrayTypeNode node) =>
-        Intern(new KokosArrayType(KokosArrayKind.Terminated, Resolve(node.ElementType)));
-
     public KokosType VisitOptionalType(KokosOptionalTypeNode node) =>
         Intern(new KokosOptionalType(Resolve(node.InnerType)));
 
@@ -282,16 +270,6 @@ public sealed class KokosTypeResolver : IKokosVisitor<KokosType>
             _diagnostics.ReportError(node.ModifierToken.Span,
                 $"'{node.ModifierToken.Text}' can only modify a type that requires a pointer to be passed " +
                 $"around, but '{innerType.DisplayName}' is a value type.");
-        }
-
-        // A terminated array exists purely for C-string interop — the pointer is never Kokos's own
-        // allocation, so it stays 'unmanaged'-only. Dynamic/fixed-length arrays now support the full
-        // owned/unowned/manual/unmanaged spectrum, same as a reference struct.
-        if (innerType is KokosArrayType { Kind: KokosArrayKind.Terminated } && node.ModifierToken.Kind != TokenKind.UnmanagedKeyword)
-        {
-            _diagnostics.ReportError(node.ModifierToken.Span,
-                $"'{node.ModifierToken.Text}' cannot modify a 'terminated' array; it's only supported as " +
-                $"'unmanaged'.");
         }
 
         return innerType;

@@ -64,11 +64,6 @@ public sealed class KokosLlvmTypeMapper
         KokosArrayType { IsValueType: true } valueArrayType =>
             LLVMTypeRef.CreateVector(Map(valueArrayType.ElementType), (uint)valueArrayType.Length!.Value),
 
-        // A terminated array (C-string interop) is always just a bare pointer — the pointer is never
-        // Kokos's own allocation, so there's no envelope/generation to speak of regardless of ownership.
-        KokosArrayType { Kind: KokosArrayKind.Terminated } terminatedType =>
-            LLVMTypeRef.CreatePointer(Map(terminatedType.ElementType), 0),
-
         // `unmanaged` is always just a bare pointer to the element type — no length field at all
         // (per spec, "unmanaged arrays dont have a length field"), regardless of Dynamic/FixedLength.
         KokosArrayType arrayType when ownership == KokosOwnershipKind.Unmanaged =>
@@ -131,7 +126,7 @@ public sealed class KokosLlvmTypeMapper
     /// A managed array's payload layout (never called for `unmanaged` — see <see cref="Map"/> — since
     /// an unmanaged array is always just a bare element pointer with no envelope at all): `Dynamic` is
     /// `{ i64 length, T* ptr }`; `FixedLength` is a bare `T*` (the length is compile-time-only, per
-    /// spec — never stored). `Terminated` never reaches this (checker restricts it to `unmanaged`).
+    /// spec — never stored).
     /// </summary>
     public LLVMTypeRef MapArrayBody(KokosArrayType arrayType) => arrayType.Kind switch
     {

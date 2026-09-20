@@ -18,7 +18,6 @@ public enum TokenKind
     EnumKeyword,
     StructKeyword,
     ValueKeyword,
-    TerminatedKeyword,
     IfKeyword,
     ElseKeyword,
     WhileKeyword,

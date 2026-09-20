@@ -260,15 +260,6 @@ public sealed class KokosParser
             case TokenKind.OpenBracket:
                 return ParseArrayLikeType(null);
 
-            case TokenKind.TerminatedKeyword:
-            {
-                var terminatedKeyword = Advance();
-                var openBracket = Expect(TokenKind.OpenBracket, "'['");
-                var elementType = ParseType();
-                var closeBracket = Expect(TokenKind.CloseBracket, "']'");
-                return new KokosTerminatedArrayTypeNode(terminatedKeyword, openBracket, elementType, closeBracket);
-            }
-
             case TokenKind.ValueKeyword:
             case TokenKind.OpenParen:
                 return ParseTupleType();

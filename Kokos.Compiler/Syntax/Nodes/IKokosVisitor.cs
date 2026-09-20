@@ -14,7 +14,6 @@ public interface IKokosVisitor<out T>
     T VisitNamedType(KokosNamedTypeNode node);
     T VisitArrayType(KokosArrayTypeNode node);
     T VisitFixedLengthArrayType(KokosFixedLengthArrayTypeNode node);
-    T VisitTerminatedArrayType(KokosTerminatedArrayTypeNode node);
     T VisitOptionalType(KokosOptionalTypeNode node);
     T VisitUnionType(KokosUnionTypeNode node);
     T VisitTupleType(KokosTupleTypeNode node);

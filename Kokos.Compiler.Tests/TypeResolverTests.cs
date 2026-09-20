@@ -306,21 +306,19 @@ public class TypeResolverTests
     }
 
     [Fact]
-    public void Classifies_all_three_array_flavors_as_pointer_shaped()
+    public void Classifies_both_array_flavors_as_pointer_shaped()
     {
         var (unit, _, resolver, diagnostics) = Setup(
-            "function f(a: [Int], b: [Int # 4], c: terminated [Int8]): Object { return a; }");
+            "function f(a: [Int], b: [Int # 4]): Object { return a; }");
         var function = (KokosFunctionNode)unit.Members[0];
 
         var dynamic = resolver.Resolve(function.Parameters.Items[0].Type);
         var fixedLength = (KokosArrayType)resolver.Resolve(function.Parameters.Items[1].Type);
-        var terminated = resolver.Resolve(function.Parameters.Items[2].Type);
 
         Assert.False(diagnostics.HasErrors);
         Assert.True(dynamic.IsPointerShaped);
         Assert.True(fixedLength.IsPointerShaped);
         Assert.Equal(4, fixedLength.Length);
-        Assert.True(terminated.IsPointerShaped);
     }
 
     [Fact]

@@ -247,23 +247,10 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             var ownership = KokosModifierMapper.OwnershipOf(parameter.Type, paramType, KokosOwnershipKind.Unowned);
             parameterOwnership.Add(ownership);
             _scope[parameter.Name] = new KokosBinding(paramType, ownership);
-
-            // A terminated array exists purely for C-string interop and stays 'unmanaged'-only.
-            if (paramType is KokosArrayType { Kind: KokosArrayKind.Terminated } && ownership != KokosOwnershipKind.Unmanaged)
-            {
-                _diagnostics.ReportError(parameter.Type.GetTokens().First().Span,
-                    "A 'terminated' array is only supported as 'unmanaged'; annotate this parameter with 'unmanaged'.");
-            }
         }
 
         _currentDeclaredReturnType = node.ReturnType is null ? null : _resolver.Resolve(node.ReturnType);
         _currentDeclaredReturnOwnership = node.ReturnType is null ? null : KokosModifierMapper.OwnershipOf(node.ReturnType);
-
-        if (_currentDeclaredReturnType is KokosArrayType { Kind: KokosArrayKind.Terminated } && _currentDeclaredReturnOwnership != KokosOwnershipKind.Unmanaged)
-        {
-            _diagnostics.ReportError(node.NameToken.Span,
-                "A 'terminated' array is only supported as 'unmanaged'; annotate the return type with 'unmanaged'.");
-        }
 
         try
         {
@@ -431,7 +418,6 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
     public KokosType VisitNamedType(KokosNamedTypeNode node) => _resolver.Resolve(node);
     public KokosType VisitArrayType(KokosArrayTypeNode node) => _resolver.Resolve(node);
     public KokosType VisitFixedLengthArrayType(KokosFixedLengthArrayTypeNode node) => _resolver.Resolve(node);
-    public KokosType VisitTerminatedArrayType(KokosTerminatedArrayTypeNode node) => _resolver.Resolve(node);
     public KokosType VisitOptionalType(KokosOptionalTypeNode node) => _resolver.Resolve(node);
     public KokosType VisitUnionType(KokosUnionTypeNode node) => _resolver.Resolve(node);
     public KokosType VisitTupleType(KokosTupleTypeNode node) => _resolver.Resolve(node);
@@ -481,12 +467,6 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
 
         if (node.Type is not null)
         {
-            if (variableType is KokosArrayType { Kind: KokosArrayKind.Terminated } && ownership != KokosOwnershipKind.Unmanaged)
-            {
-                _diagnostics.ReportError(node.NameToken.Span,
-                    "A 'terminated' array is only supported as 'unmanaged'; annotate '" + node.Name + "' with 'unmanaged'.");
-            }
-
             if (ownership is KokosOwnershipKind.Owned or KokosOwnershipKind.Unowned or KokosOwnershipKind.Manual
                 && TryGetOwnership(node.Initializer, out var sourceOwnership) && sourceOwnership == KokosOwnershipKind.Unmanaged)
             {
@@ -1101,14 +1081,8 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             return KokosErrorType.Instance;
         }
 
-        if (targetType is KokosArrayType arrayType && node.MemberName == "length")
+        if (targetType is KokosArrayType && node.MemberName == "length")
         {
-            if (arrayType.Kind == KokosArrayKind.Terminated)
-            {
-                _diagnostics.ReportError(node.NameToken.Span, "A 'terminated' array has no 'length' field.");
-                return KokosErrorType.Instance;
-            }
-
             if (TryGetOwnership(node.Target, out var arrayOwnership) && arrayOwnership == KokosOwnershipKind.Unmanaged)
             {
                 _diagnostics.ReportError(node.NameToken.Span, "An 'unmanaged' array has no 'length' field.");

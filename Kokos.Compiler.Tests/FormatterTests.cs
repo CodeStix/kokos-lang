@@ -158,7 +158,6 @@ public class FormatterTests
             type EnumTest=Person|Fruit;
             type MaybeInt=Int?;
             type Buffer=[Int#4];
-            type CStr=terminated[Int8];
             """,
             out var diagnostics);
         Assert.False(diagnostics.HasErrors);
@@ -174,8 +173,6 @@ public class FormatterTests
             type MaybeInt = Int?;
 
             type Buffer = [Int # 4];
-
-            type CStr = terminated [Int8];
 
             """,
             KokosFormatter.Format(unit));

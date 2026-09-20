@@ -502,15 +502,16 @@ public class CodeGenTests
     }
 
     [Fact]
-    public void Unmanaged_terminated_array_round_trips_through_a_real_C_function()
+    public void Unmanaged_array_round_trips_through_a_real_C_function()
     {
-        // strlen takes a real null-terminated C string — exactly what 'terminated [UInt8]' models.
-        // The exported function just forwards its own raw pointer straight through to it.
+        // strlen takes a real null-terminated C string — 'unmanaged [UInt8]' is a bare pointer with
+        // no length field, exactly matching a raw char*. The exported function just forwards its own
+        // raw pointer straight through to it.
         using var jit = GenerateAndJit(
             """
-            import function strlen(str: unmanaged terminated [UInt8]): Int64;
+            import function strlen(str: unmanaged [UInt8]): Int64;
 
-            export function myStrlen(str: unmanaged terminated [UInt8]): Int64 {
+            export function myStrlen(str: unmanaged [UInt8]): Int64 {
                 return strlen(str);
             }
             """);

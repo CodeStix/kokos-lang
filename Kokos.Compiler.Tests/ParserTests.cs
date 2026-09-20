@@ -168,10 +168,10 @@ public class ParserTests
     }
 
     [Fact]
-    public void Parses_all_three_array_type_flavors()
+    public void Parses_both_array_type_flavors()
     {
         var unit = KokosParser.Parse(
-            "function f(a: [Int], b: [Int # 4], c: terminated [Int8]) {}",
+            "function f(a: [Int], b: [Int # 4]) {}",
             out var diagnostics);
         Assert.False(diagnostics.HasErrors);
 
@@ -180,8 +180,6 @@ public class ParserTests
 
         var fixedLength = Assert.IsType<KokosFixedLengthArrayTypeNode>(parameters[1].Type);
         Assert.Equal("4", fixedLength.SizeToken.Text);
-
-        Assert.IsType<KokosTerminatedArrayTypeNode>(parameters[2].Type);
     }
 
     [Fact]

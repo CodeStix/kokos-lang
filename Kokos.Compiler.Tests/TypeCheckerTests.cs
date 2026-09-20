@@ -1289,15 +1289,6 @@ public class TypeCheckerTests
     }
 
     [Fact]
-    public void Terminated_array_parameter_without_an_explicit_unmanaged_modifier_is_a_diagnostic()
-    {
-        var (unit, _, checker, diagnostics) = Setup("function f(bytes: terminated [UInt8]): Int { return 0; }");
-        CheckFunction(checker, unit);
-
-        Assert.True(diagnostics.HasErrors);
-    }
-
-    [Fact]
     public void Assigning_an_unmanaged_reference_into_an_owned_local_is_a_diagnostic()
     {
         const string source = """
@@ -1356,15 +1347,6 @@ public class TypeCheckerTests
     public void Length_on_an_unmanaged_array_is_a_diagnostic()
     {
         var (unit, _, checker, diagnostics) = Setup("function f(arr: unmanaged [Int]): Int { return arr.length; }");
-        CheckFunction(checker, unit);
-
-        Assert.True(diagnostics.HasErrors);
-    }
-
-    [Fact]
-    public void Length_on_a_terminated_array_is_a_diagnostic()
-    {
-        var (unit, _, checker, diagnostics) = Setup("function f(arr: unmanaged terminated [Int8]): Int { return arr.length; }");
         CheckFunction(checker, unit);
 
         Assert.True(diagnostics.HasErrors);

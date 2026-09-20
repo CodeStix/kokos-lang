@@ -711,20 +711,20 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     }
 
     /// <summary>
-    /// The bare `T*` element pointer for any array shape/ownership: `unmanaged` (or `terminated`,
-    /// which is always `unmanaged`) is already exactly that; anything else resolves the envelope
-    /// (generation-checked for `unowned`/`manual`) and loads through to the buffer pointer.
+    /// The bare `T*` element pointer for any array shape/ownership: `unmanaged` is already exactly
+    /// that; anything else resolves the envelope (generation-checked for `unowned`/`manual`) and loads
+    /// through to the buffer pointer.
     /// </summary>
     private LLVMValueRef ResolveArrayElementPointer(LLVMValueRef value, KokosOwnershipKind ownership, KokosArrayType arrayType)
     {
-        if (ownership == KokosOwnershipKind.Unmanaged || arrayType.Kind == KokosArrayKind.Terminated)
+        if (ownership == KokosOwnershipKind.Unmanaged)
             return value;
 
         var bodyPointer = ResolveBodyPointer(value, ownership, arrayType);
         return LoadElementPointerFromBody(bodyPointer, arrayType);
     }
 
-    /// <summary>The runtime length: a compile-time constant for `FixedLength`, or a load through the resolved envelope for a managed `Dynamic` array (never called for `unmanaged`/`terminated` — the checker rejects `.length` on those).</summary>
+    /// <summary>The runtime length: a compile-time constant for `FixedLength`, or a load through the resolved envelope for a managed `Dynamic` array (never called for `unmanaged` — the checker rejects `.length` on it).</summary>
     private LLVMValueRef LoadArrayLength(LLVMValueRef value, KokosOwnershipKind ownership, KokosArrayType arrayType)
     {
         if (arrayType.Kind == KokosArrayKind.FixedLength)
@@ -741,13 +741,13 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
 
     /// <summary>
     /// Resolves an index expression's element pointer, bounds-checking it first unless the array is
-    /// `unmanaged`/`terminated` — "the user is allowed to use any index... but it is unsafe," per spec.
+    /// `unmanaged` — "the user is allowed to use any index... but it is unsafe," per spec.
     /// </summary>
     private LLVMValueRef ComputeIndexedElementPointer(LLVMValueRef targetValue, KokosOwnershipKind ownership, KokosArrayType arrayType, LLVMValueRef indexValue)
     {
         var elementType = _typeMapper.Map(arrayType.ElementType);
 
-        if (ownership == KokosOwnershipKind.Unmanaged || arrayType.Kind == KokosArrayKind.Terminated)
+        if (ownership == KokosOwnershipKind.Unmanaged)
             return _builder.BuildGEP2(elementType, targetValue, new LLVMValueRef[] { indexValue }, "elemptr");
 
         var length = LoadArrayLength(targetValue, ownership, arrayType);
@@ -1121,7 +1121,6 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     public LLVMValueRef VisitNamedType(KokosNamedTypeNode node) => throw NotYet(nameof(KokosNamedTypeNode), "type nodes aren't visited by codegen directly");
     public LLVMValueRef VisitArrayType(KokosArrayTypeNode node) => throw NotYet(nameof(KokosArrayTypeNode), "type nodes aren't visited by codegen directly");
     public LLVMValueRef VisitFixedLengthArrayType(KokosFixedLengthArrayTypeNode node) => throw NotYet(nameof(KokosFixedLengthArrayTypeNode), "type nodes aren't visited by codegen directly");
-    public LLVMValueRef VisitTerminatedArrayType(KokosTerminatedArrayTypeNode node) => throw NotYet(nameof(KokosTerminatedArrayTypeNode), "type nodes aren't visited by codegen directly");
     public LLVMValueRef VisitOptionalType(KokosOptionalTypeNode node) => throw NotYet(nameof(KokosOptionalTypeNode), "type nodes aren't visited by codegen directly");
     public LLVMValueRef VisitUnionType(KokosUnionTypeNode node) => throw NotYet(nameof(KokosUnionTypeNode), "type nodes aren't visited by codegen directly");
     public LLVMValueRef VisitTupleType(KokosTupleTypeNode node) => throw NotYet(nameof(KokosTupleTypeNode), "type nodes aren't visited by codegen directly");

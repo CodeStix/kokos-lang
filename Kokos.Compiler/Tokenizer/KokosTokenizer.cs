@@ -23,7 +23,6 @@ public sealed class KokosTokenizer
         ["enum"] = TokenKind.EnumKeyword,
         ["struct"] = TokenKind.StructKeyword,
         ["value"] = TokenKind.ValueKeyword,
-        ["terminated"] = TokenKind.TerminatedKeyword,
         ["if"] = TokenKind.IfKeyword,
         ["else"] = TokenKind.ElseKeyword,
         ["while"] = TokenKind.WhileKeyword,
