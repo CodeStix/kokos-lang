@@ -12,8 +12,10 @@ public sealed class KokosFunctionType : KokosType
 {
     public IReadOnlyList<KokosType> ParameterTypes { get; }
     public IReadOnlyList<KokosOwnershipKind> ParameterOwnership { get; }
+    public IReadOnlyList<bool> ParameterReadOnly { get; }
     public KokosType ReturnType { get; }
     public KokosOwnershipKind ReturnOwnership { get; }
+    public bool ReturnReadOnly { get; }
     public KokosFunctionNode Declaration { get; }
 
     public KokosFunctionType(
@@ -21,12 +23,16 @@ public sealed class KokosFunctionType : KokosType
         IReadOnlyList<KokosOwnershipKind> parameterOwnership,
         KokosType returnType,
         KokosOwnershipKind returnOwnership,
-        KokosFunctionNode declaration)
+        KokosFunctionNode declaration,
+        IReadOnlyList<bool>? parameterReadOnly = null,
+        bool returnReadOnly = false)
     {
         ParameterTypes = parameterTypes;
         ParameterOwnership = parameterOwnership;
+        ParameterReadOnly = parameterReadOnly ?? parameterTypes.Select(_ => false).ToList();
         ReturnType = returnType;
         ReturnOwnership = returnOwnership;
+        ReturnReadOnly = returnReadOnly;
         Declaration = declaration;
     }
 

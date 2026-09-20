@@ -249,14 +249,37 @@ public sealed class KokosParser
     /// The modifier binds to a single atomic type, not the whole expression around it — this is what
     /// lets each member of a union carry its own independent modifier (<c>owned Person|unowned
     /// Fruit</c>), since <see cref="ParseUnionType"/> calls <see cref="ParseOptionalType"/> (and thus
-    /// this) once per member.
+    /// this) once per member. An ownership modifier (<c>owned</c>/<c>unowned</c>/<c>manual</c>/
+    /// <c>unmanaged</c>) and <c>readonly</c> are independent, stackable categories — <c>readonly
+    /// unowned Person</c> parses as one <see cref="KokosModifiedTypeNode"/> nested inside another,
+    /// in whichever order they're written. A second modifier from the same category is a diagnostic
+    /// rather than silently keeping the first or the last.
     /// </summary>
     private KokosTypeNode ParseModifiedType()
     {
-        if (Current.Kind is TokenKind.OwnedKeyword or TokenKind.UnownedKeyword or TokenKind.ManualKeyword or TokenKind.UnmanagedKeyword)
+        if (Current.Kind is TokenKind.OwnedKeyword or TokenKind.UnownedKeyword or TokenKind.ManualKeyword
+            or TokenKind.UnmanagedKeyword or TokenKind.ReadOnlyKeyword)
         {
+            return ParseModifiedType(sawOwnership: false, sawReadOnly: false);
+        }
+
+        return ParseAtomicType();
+    }
+
+    private KokosTypeNode ParseModifiedType(bool sawOwnership, bool sawReadOnly)
+    {
+        if (Current.Kind is TokenKind.OwnedKeyword or TokenKind.UnownedKeyword or TokenKind.ManualKeyword
+            or TokenKind.UnmanagedKeyword or TokenKind.ReadOnlyKeyword)
+        {
+            var isReadOnly = Current.Kind == TokenKind.ReadOnlyKeyword;
+            if (isReadOnly ? sawReadOnly : sawOwnership)
+            {
+                _diagnostics.ReportError(Current.Span,
+                    isReadOnly ? "A type can only have one 'readonly' modifier." : "A type can only have one ownership modifier.");
+            }
+
             var modifierToken = Advance();
-            return new KokosModifiedTypeNode(modifierToken, ParseAtomicType());
+            return new KokosModifiedTypeNode(modifierToken, ParseModifiedType(sawOwnership || !isReadOnly, sawReadOnly || isReadOnly));
         }
 
         return ParseAtomicType();

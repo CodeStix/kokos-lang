@@ -95,6 +95,103 @@ public class KokosHoverHandlerTests
     }
 
     [Fact]
+    public async Task Hovering_over_a_let_declarations_own_name_shows_its_type_and_ownership()
+    {
+        const string source = """
+            struct Person { age: Int }
+
+            function f(age: Int): Int {
+                let p: Person = Person(age: age);
+                return p.age;
+            }
+            """;
+
+        var line = source.Split('\n').ToList().FindIndex(l => l.Contains("let p:"));
+        var character = source.Split('\n')[line].IndexOf('p');
+
+        var hover = await Hover(source, line, character);
+
+        Assert.NotNull(hover);
+        Assert.Contains("owned Person", ContentsText(hover!));
+    }
+
+    [Fact]
+    public async Task Hovering_over_a_function_parameters_own_name_shows_its_type_and_ownership()
+    {
+        const string source = """
+            struct Person { age: Int }
+
+            function borrow(p: unowned Person): Int {
+                return p.age;
+            }
+            """;
+
+        var line = source.Split('\n').ToList().FindIndex(l => l.Contains("function borrow"));
+        var character = source.Split('\n')[line].IndexOf("(p:", StringComparison.Ordinal) + 1;
+
+        var hover = await Hover(source, line, character);
+
+        Assert.NotNull(hover);
+        Assert.Contains("unowned Person", ContentsText(hover!));
+    }
+
+    [Fact]
+    public async Task Hovering_over_a_parameter_with_no_explicit_modifier_shows_the_default_unowned()
+    {
+        const string source = """
+            struct Person { age: Int }
+
+            function borrow(p: Person): Int {
+                return p.age;
+            }
+            """;
+
+        var line = source.Split('\n').ToList().FindIndex(l => l.Contains("function borrow"));
+        var character = source.Split('\n')[line].IndexOf("(p:", StringComparison.Ordinal) + 1;
+
+        var hover = await Hover(source, line, character);
+
+        Assert.NotNull(hover);
+        Assert.Contains("unowned Person", ContentsText(hover!));
+    }
+
+    [Fact]
+    public async Task Hovering_over_an_unmanaged_parameters_own_name_shows_unmanaged()
+    {
+        const string source = """
+            type CString = unmanaged [Int8];
+
+            import function puts(str: CString);
+            """;
+
+        var line = source.Split('\n').ToList().FindIndex(l => l.Contains("puts"));
+        var character = source.Split('\n')[line].IndexOf("(str:", StringComparison.Ordinal) + 1;
+
+        var hover = await Hover(source, line, character);
+
+        Assert.NotNull(hover);
+        Assert.Contains("unmanaged", ContentsText(hover!));
+    }
+
+    [Fact]
+    public async Task Hovering_over_a_static_variables_own_name_shows_its_type_and_ownership()
+    {
+        const string source = """
+            struct Person { age: Int }
+
+            static let p: Person;
+            """;
+
+        var line = source.Split('\n').ToList().FindIndex(l => l.Contains("static let"));
+        var character = source.Split('\n')[line].IndexOf("p:", StringComparison.Ordinal);
+
+        var hover = await Hover(source, line, character);
+
+        Assert.NotNull(hover);
+        Assert.Contains("owned Person", ContentsText(hover!));
+    }
+
+    [Fact]
     public async Task Hovering_outside_any_document_returns_null()
     {
         var documents = new KokosDocumentStore();

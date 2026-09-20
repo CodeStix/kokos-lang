@@ -168,8 +168,9 @@ public sealed class KokosTypeResolver : IKokosVisitor<KokosType>
             var fieldNode = fieldNodes[i];
             var type = Resolve(fieldNode.Type);
             var ownership = KokosModifierMapper.OwnershipOf(fieldNode.Type, type, KokosOwnershipKind.Owned, _table);
+            var isReadOnly = KokosModifierMapper.IsReadOnlyOf(fieldNode.Type, _table);
 
-            fields.Add(new KokosStructField(fieldNode.Name, fieldNode.IndexToken is not null, i, type, ownership));
+            fields.Add(new KokosStructField(fieldNode.Name, fieldNode.IndexToken is not null, i, type, ownership, isReadOnly));
         }
 
         return fields;

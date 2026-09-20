@@ -1,32 +1,25 @@
 
+// okey i didn't notice that was the problem, your solution doesn't quite work, see below:
 
 type CString = unmanaged [Int8];
 
 import function puts(str: CString);
 
+// please add a new keyword that can be inferred or typed manually: readonly
+function getStr() {
+    return "hello world!"; 
+}
+
 struct Person {
-    name: CString,
     age: Int
 }
 
+static let person: Person;
+
 export function main() {
-    let str = "stijn";
-
-    let i = 10;
-    while i > 0 {
-        puts(str);
-        i = i - 1;
-    }
-
-    let person = createPerson("stijn", 10);
-
-    if destroyed(person) {
-        puts("person destroyed");
-    }
-
-    return str.length;
+    return person.age;
 }
 
-function createPerson(name: CString, age: Int): Person {
-    return Person(name: name, age: age);
-}
+
+
+// please implement the readonly modifier. readonly can be added to pointer types like non-value structs and non-value arrays and prevents being written to a pointed-to value

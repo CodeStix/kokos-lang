@@ -32,11 +32,9 @@ internal sealed class KokosHoverHandler : HoverHandlerBase
         var lineIndex = new KokosLineIndex(text);
         var offset = lineIndex.GetOffset(request.Position.Line, request.Position.Character);
 
-        var expression = KokosAstLocator.FindExpressionAt(compilation.Unit, offset);
-        if (expression is null || !compilation.Checker.ExpressionTypes.TryGetValue(expression, out var type))
+        var description = DescribeAt(compilation.Checker, compilation.Unit, offset);
+        if (description is null)
             return Task.FromResult<Hover?>(null);
-
-        var description = Describe(compilation.Checker, expression, type);
 
         return Task.FromResult<Hover?>(new Hover
         {
@@ -49,14 +47,62 @@ internal sealed class KokosHoverHandler : HoverHandlerBase
     }
 
     /// <summary>
-    /// "unowned Person", "owned [Int8]", or just "Int" — ownership is only meaningful for a
-    /// pointer-shaped type, and only shown when the checker actually recorded one for this exact
-    /// expression (see <see cref="KokosTypeChecker.ExpressionOwnership"/> — populated for identifiers
-    /// and field accesses resolved against a live binding during the check pass).
+    /// Two kinds of hover position: a *use* of a name somewhere in an expression (an identifier, a
+    /// field access, ...), resolved via <see cref="KokosAstLocator.FindExpressionAt"/> against
+    /// <see cref="KokosTypeChecker.ExpressionTypes"/>/<c>ExpressionOwnership</c>; or the *declaration*
+    /// of a name itself (a `let` binding's name, a function parameter's name, a `static let`'s name),
+    /// which isn't wrapped in any expression node and is resolved via
+    /// <see cref="KokosAstLocator.FindDeclarationNameAt"/> against the checker's per-declaration
+    /// dictionaries instead. The two never overlap positionally, so trying the expression case first is
+    /// just a matter of checking the common case first.
     /// </summary>
-    private static string Describe(KokosTypeChecker checker, KokosExpressionNode expression, KokosType type)
+    private static string? DescribeAt(KokosTypeChecker checker, KokosCompilationUnitNode unit, int offset)
     {
-        if (!type.IsPointerShaped || !checker.ExpressionOwnership.TryGetValue(expression, out var ownership))
+        var expression = KokosAstLocator.FindExpressionAt(unit, offset);
+        if (expression is not null && checker.ExpressionTypes.TryGetValue(expression, out var expressionType))
+        {
+            var ownership = checker.ExpressionOwnership.TryGetValue(expression, out var o) ? o : (KokosOwnershipKind?)null;
+            var isReadOnly = checker.ExpressionReadOnly.GetValueOrDefault(expression);
+            return Describe(expressionType, ownership, isReadOnly);
+        }
+
+        return KokosAstLocator.FindDeclarationNameAt(unit, offset) switch
+        {
+            KokosVarDeclName(var node) when checker.LocalTypes.TryGetValue(node, out var type) =>
+                Describe(type, checker.LocalOwnership.GetValueOrDefault(node, KokosOwnershipKind.Inferred), checker.LocalReadOnly.GetValueOrDefault(node)),
+
+            KokosParameterName(var node, var function) when checker.FunctionTypes.TryGetValue(function, out var functionType) =>
+                DescribeParameter(node, function, functionType),
+
+            KokosStaticVarName(var node) when checker.StaticVariables.TryGetValue(node.Name, out var entry) =>
+                Describe(entry.Type, entry.Ownership, entry.IsReadOnly),
+
+            _ => null,
+        };
+    }
+
+    private static string? DescribeParameter(KokosParameterNode node, KokosFunctionNode function, KokosFunctionType functionType)
+    {
+        var index = function.Parameters.Items.ToList().IndexOf(node);
+        if (index < 0 || index >= functionType.ParameterTypes.Count)
+            return null;
+
+        return Describe(functionType.ParameterTypes[index], functionType.ParameterOwnership[index], functionType.ParameterReadOnly[index]);
+    }
+
+    /// <summary>
+    /// "readonly unowned Person", "owned [Int8]", or just "Int" — ownership/readonly are only ever
+    /// shown for a pointer-shaped type (a value type has no concept of either), but for one of those
+    /// ownership is always shown: every pointer-shaped declaration in this checker has a resolved
+    /// ownership by construction (a local's/static's default-or-explicit ownership, a parameter's
+    /// default-or-explicit ownership), so a missing ownership only ever means the *type itself*
+    /// couldn't be resolved (an error type) rather than a real gap to hide. `readonly` is only
+    /// prepended when true — it's a restriction, not an identity, so there's nothing to show for its
+    /// absence.
+    /// </summary>
+    private static string Describe(KokosType type, KokosOwnershipKind? ownership, bool isReadOnly)
+    {
+        if (!type.IsPointerShaped || ownership is null)
             return type.DisplayName;
 
         var keyword = ownership switch
@@ -68,7 +114,8 @@ internal sealed class KokosHoverHandler : HoverHandlerBase
             _ => null,
         };
 
-        return keyword is null ? type.DisplayName : $"{keyword} {type.DisplayName}";
+        var prefix = isReadOnly ? "readonly " : "";
+        return keyword is null ? $"{prefix}{type.DisplayName}" : $"{prefix}{keyword} {type.DisplayName}";
     }
 
     protected override HoverRegistrationOptions CreateRegistrationOptions(

@@ -1598,6 +1598,254 @@ public class TypeCheckerTests
         Assert.True(diagnostics.HasErrors);
     }
 
+    [Fact]
+    public void Writing_into_an_index_of_a_string_literal_directly_is_a_diagnostic()
+    {
+        var (unit, _, checker, diagnostics) = Setup("""function f() { "hi"[0] = "x"[0]; }""");
+        CheckFunction(checker, unit);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Writing_into_an_index_of_a_local_bound_from_a_string_literal_is_a_diagnostic()
+    {
+        var (unit, _, checker, diagnostics) = Setup("""
+            function f() {
+                let str = "stijn";
+                str[0] = str[1];
+            }
+            """);
+        CheckFunction(checker, unit);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Writing_into_an_index_of_a_local_rebound_from_a_string_literal_local_is_still_a_diagnostic()
+    {
+        // The read-only bit follows a direct identifier-to-identifier rebind too, not just the literal
+        // itself.
+        var (unit, _, checker, diagnostics) = Setup("""
+            function f() {
+                let a = "stijn";
+                let b = a;
+                b[0] = b[1];
+            }
+            """);
+        CheckFunction(checker, unit);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Writing_into_an_index_of_a_genuinely_constructed_array_is_not_a_diagnostic()
+    {
+        var (unit, _, checker, diagnostics) = Setup("""
+            function f() {
+                let arr = [0 # 5];
+                arr[0] = 42;
+            }
+            """);
+        CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Reading_an_index_of_a_string_literal_is_not_a_diagnostic()
+    {
+        var (unit, _, checker, diagnostics) = Setup("""function f(): Int8 { let str = "stijn"; return str[0]; }""");
+        CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Reassigning_a_local_bound_from_a_string_literal_to_a_whole_new_value_is_not_a_diagnostic()
+    {
+        // Rebinding the whole variable is fine — it's only writing *into* the shared literal storage
+        // that's unsafe.
+        var (unit, _, checker, diagnostics) = Setup("""
+            function f() {
+                let str = "stijn";
+                str = "other";
+            }
+            """);
+        CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    // --- The 'readonly' modifier ----------------------------------------------------------------
+
+    [Fact]
+    public void A_readonly_value_returned_through_a_function_call_still_rejects_a_later_write()
+    {
+        // The exact reported bug: the old heuristic only traced a literal through a direct
+        // identifier rebind, so it lost the fact the instant the value passed through a function call.
+        const string source = """
+            function getStr() {
+                return "stijn";
+            }
+            function f() {
+                let str = getStr();
+                str[0] = str[1];
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[0]);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[1]);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void An_explicit_readonly_parameter_rejects_an_index_write()
+    {
+        var (unit, _, checker, diagnostics) = Setup("""
+            function f(arr: readonly unowned [Int]) {
+                arr[0] = 1;
+            }
+            """);
+        CheckFunction(checker, unit);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void A_readonly_struct_field_rejects_a_write_through_an_otherwise_mutable_reference()
+    {
+        // Transitivity in the OTHER direction: 'p' itself isn't readonly, but 'name' is individually
+        // declared readonly on the struct — that alone must block the write.
+        const string source = """
+            struct Person { name: readonly unowned [Int8], age: Int }
+            function f(p: unowned Person) {
+                p.name[0] = 1;
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[1]);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void A_readonly_struct_reference_transitively_blocks_writing_a_non_readonly_field()
+    {
+        // The other direction: 'name' itself carries no modifier, but 'p' is readonly, so nothing
+        // reachable through 'p' can be written — like C++'s const T* propagating to every member.
+        const string source = """
+            struct Person { name: unowned [Int8], age: Int }
+            function f(p: readonly unowned Person) {
+                p.name[0] = 1;
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[1]);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Passing_a_readonly_value_into_an_explicitly_non_readonly_parameter_is_a_diagnostic()
+    {
+        const string source = """
+            function getStr() {
+                return "stijn";
+            }
+            function borrow(arr: unowned [Int8]) { }
+            function f() {
+                borrow(getStr());
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[0]);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[1]);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[2]);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Passing_a_non_readonly_value_where_readonly_is_expected_is_not_a_diagnostic()
+    {
+        // Widening is always safe, per explicit direction.
+        const string source = """
+            function borrow(arr: readonly unowned [Int]) { }
+            function f() {
+                let arr = [0 # 5];
+                borrow(arr);
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[0]);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[1]);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Binding_a_readonly_source_with_no_annotation_is_not_a_narrowing_diagnostic()
+    {
+        // No annotation means the local infers its own readonly-ness from the source — nothing is
+        // being narrowed.
+        var (unit, _, checker, diagnostics) = Setup("""function f() { let str = "stijn"; }""");
+        CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Passing_a_readonly_value_into_an_unmanaged_parameter_is_not_a_diagnostic()
+    {
+        // 'unmanaged' already opts out of every other tracked safety net — this is the load-bearing
+        // C-interop pattern (pass a string literal straight into puts()/strlen()) that must keep working.
+        const string source = """
+            type CString = unmanaged [Int8];
+            import function puts(str: CString);
+            function f() {
+                puts("stijn");
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[1]);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[2]);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Readonly_value_type_is_rejected_by_the_pointer_shaped_check()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f(x: readonly Int) { }");
+        CheckFunction(checker, unit);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Stacking_two_ownership_modifiers_is_a_parse_diagnostic()
+    {
+        KokosParser.Parse("struct Person { age: Int } function f(p: owned unowned Person) { }", out var diagnostics);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Stacking_two_readonly_modifiers_is_a_parse_diagnostic()
+    {
+        KokosParser.Parse("struct Person { age: Int } function f(p: readonly readonly Person) { }", out var diagnostics);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
     // --- Ownership modifiers behind a transparent type alias --------------------------------------
 
     [Fact]

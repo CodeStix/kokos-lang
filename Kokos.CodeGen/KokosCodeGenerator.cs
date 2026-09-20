@@ -191,7 +191,7 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     /// </summary>
     private void DeclareStaticVariables()
     {
-        foreach (var (name, (type, ownership)) in _checker.StaticVariables)
+        foreach (var (name, (type, ownership, _)) in _checker.StaticVariables)
         {
             var llvmType = _typeMapper.Map(type, ownership);
             var global = _module.AddGlobal(llvmType, name);

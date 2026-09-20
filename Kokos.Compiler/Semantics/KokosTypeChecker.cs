@@ -32,11 +32,13 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
     private readonly Dictionary<KokosExpressionNode, KokosType> _expressionTypes = new();
     private readonly Dictionary<KokosVarDeclNode, KokosOwnershipKind> _localOwnership = new();
     private readonly Dictionary<KokosExpressionNode, KokosOwnershipKind> _expressionOwnership = new();
+    private readonly Dictionary<KokosVarDeclNode, bool> _localReadOnly = new();
+    private readonly Dictionary<KokosExpressionNode, bool> _expressionReadOnly = new();
     private readonly Dictionary<KokosVarDeclNode, KokosType> _localTypes = new();
     private readonly Dictionary<KokosNode, IReadOnlyList<string>> _releasePoints = new();
     private readonly HashSet<KokosFunctionNode> _inProgress = new();
     private readonly Dictionary<KokosStaticVarDeclNode, KokosBinding> _staticVariableBindings = new();
-    private readonly Dictionary<string, (KokosType Type, KokosOwnershipKind Ownership)> _staticVariables = new();
+    private readonly Dictionary<string, (KokosType Type, KokosOwnershipKind Ownership, bool IsReadOnly)> _staticVariables = new();
 
     /// <summary>Every function's resolved signature, keyed by declaration — consumed by codegen.</summary>
     public IReadOnlyDictionary<KokosFunctionNode, KokosFunctionType> FunctionTypes => _functionTypes;
@@ -54,8 +56,14 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
     /// </summary>
     public IReadOnlyDictionary<KokosExpressionNode, KokosOwnershipKind> ExpressionOwnership => _expressionOwnership;
 
+    /// <summary>Every expression's resolved `readonly`-ness, keyed by node — the <c>readonly</c> counterpart of <see cref="ExpressionOwnership"/>, populated the same way.</summary>
+    public IReadOnlyDictionary<KokosExpressionNode, bool> ExpressionReadOnly => _expressionReadOnly;
+
     /// <summary>Every `let` local's resolved ownership, keyed by declaration — consumed by codegen to pick the right LLVM representation (bare pointer vs. reference pair).</summary>
     public IReadOnlyDictionary<KokosVarDeclNode, KokosOwnershipKind> LocalOwnership => _localOwnership;
+
+    /// <summary>Every `let` local's resolved `readonly`-ness, keyed by declaration.</summary>
+    public IReadOnlyDictionary<KokosVarDeclNode, bool> LocalReadOnly => _localReadOnly;
 
     /// <summary>
     /// Every `let` local's resolved *declared* type, keyed by declaration — this is deliberately not
@@ -71,7 +79,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
     /// declare one LLVM global per static and seed every function's scope with it (see
     /// <see cref="GetStaticVariableBinding"/>/<see cref="CheckFunctionCore"/>).
     /// </summary>
-    public IReadOnlyDictionary<string, (KokosType Type, KokosOwnershipKind Ownership)> StaticVariables => _staticVariables;
+    public IReadOnlyDictionary<string, (KokosType Type, KokosOwnershipKind Ownership, bool IsReadOnly)> StaticVariables => _staticVariables;
 
     /// <summary>
     /// The compiler-inserted-release half of the move checker: at a <see cref="KokosReturnNode"/>, or
@@ -100,11 +108,28 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         /// </summary>
         public bool IsStatic { get; }
 
-        public KokosBinding(KokosType type, KokosOwnershipKind ownership, bool isStatic = false)
+        /// <summary>
+        /// This binding's resolved `readonly`-ness — explicit (<c>readonly unowned Person</c>) or
+        /// inferred from its initializer/parameter source (see <see cref="TryGetReadOnly"/>), the
+        /// `readonly` counterpart of <see cref="Ownership"/>. A `readonly` reference can never be
+        /// written through (an index or field write is a diagnostic — see <see cref="VisitAssignment"/>)
+        /// and can never be implicitly narrowed to non-`readonly` (see
+        /// <see cref="CheckNoReadOnlyNarrowing"/>); a string literal is the prototypical example — it's
+        /// a deduplicated, `IsGlobalConstant` LLVM global (see
+        /// <see cref="Kokos.CodeGen.KokosCodeGenerator.GetOrCreateStringLiteralEnvelope"/>, in
+        /// Kokos.CodeGen), so writing into it corrupts real read-only process memory (and, since
+        /// identical literals share one global, every other occurrence of that exact literal too) —
+        /// this is what makes it a real, statically-checked type property rather than a
+        /// best-effort heuristic.
+        /// </summary>
+        public bool IsReadOnly { get; }
+
+        public KokosBinding(KokosType type, KokosOwnershipKind ownership, bool isStatic = false, bool isReadOnly = false)
         {
             Type = type;
             Ownership = ownership;
             IsStatic = isStatic;
+            IsReadOnly = isReadOnly;
         }
     }
 
@@ -115,6 +140,8 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
     private List<KokosType> _currentReturnTypes = new();
     private KokosOwnershipKind? _currentDeclaredReturnOwnership;
     private List<KokosOwnershipKind> _currentReturnOwnerships = new();
+    private bool? _currentDeclaredReadOnlyReturn;
+    private List<bool> _currentReturnReadOnlyValues = new();
     private KokosType? _expectedType;
 
     /// <summary>
@@ -168,6 +195,23 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
     {
         var type = expression.Accept(this);
         _expressionTypes[expression] = type;
+
+        // Best-effort, but done centrally and unconditionally (unlike the scattered call sites that
+        // use TryGetOwnership for their own diagnostics) so ExpressionOwnership ends up populated for
+        // every pointer-shaped expression TryGetOwnership can resolve at all — not just the ones that
+        // happen to also need an ownership check for some other reason. A handful of call sites (e.g.
+        // VisitMemberAccess's base-identifier special case) bypass TypeOf and record into
+        // _expressionOwnership themselves instead; the `ContainsKey` guard here just avoids redoing
+        // that work, not correctness.
+        if (type.IsPointerShaped && !_expressionOwnership.ContainsKey(expression) && TryGetOwnership(expression, out var ownership))
+            _expressionOwnership[expression] = ownership;
+
+        // TryGetReadOnly's "couldn't determine" case collapses naturally to false (mutable), so unlike
+        // ownership there's no out-bool/ContainsKey dance needed here for correctness — the ContainsKey
+        // guard still avoids redoing VisitMemberAccess's own manual recording (see that method).
+        if (type.IsPointerShaped && !_expressionReadOnly.ContainsKey(expression))
+            _expressionReadOnly[expression] = TryGetReadOnly(expression);
+
         return type;
     }
 
@@ -231,7 +275,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
     public KokosType VisitStaticVarDecl(KokosStaticVarDeclNode node)
     {
         var binding = GetStaticVariableBinding(node);
-        _staticVariables[node.Name] = (binding.Type, binding.Ownership);
+        _staticVariables[node.Name] = (binding.Type, binding.Ownership, binding.IsReadOnly);
         return binding.Type;
     }
 
@@ -243,7 +287,8 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
 
         var type = _resolver.Resolve(node.Type);
         var ownership = KokosModifierMapper.OwnershipOf(node.Type, type, KokosOwnershipKind.Owned, _table);
-        var binding = new KokosBinding(type, ownership, isStatic: true);
+        var isReadOnly = KokosModifierMapper.IsReadOnlyOf(node.Type, _table);
+        var binding = new KokosBinding(type, ownership, isStatic: true, isReadOnly: isReadOnly);
         _staticVariableBindings[node] = binding;
         return binding;
     }
@@ -285,11 +330,14 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         var outerReturnTypes = _currentReturnTypes;
         var outerDeclaredReturnOwnership = _currentDeclaredReturnOwnership;
         var outerReturnOwnerships = _currentReturnOwnerships;
+        var outerDeclaredReadOnlyReturn = _currentDeclaredReadOnlyReturn;
+        var outerReturnReadOnlyValues = _currentReturnReadOnlyValues;
         var outerConsumed = _consumed;
 
         _scope = new Dictionary<string, KokosBinding>();
         _currentReturnTypes = [];
         _currentReturnOwnerships = [];
+        _currentReturnReadOnlyValues = [];
         _consumed = [];
 
         // Every static variable is visible from every function, exactly like a local already in
@@ -301,17 +349,21 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
 
         var parameterTypes = new List<KokosType>();
         var parameterOwnership = new List<KokosOwnershipKind>();
+        var parameterReadOnly = new List<bool>();
         foreach (var parameter in node.Parameters.Items)
         {
             var paramType = _resolver.Resolve(parameter.Type);
             parameterTypes.Add(paramType);
             var ownership = KokosModifierMapper.OwnershipOf(parameter.Type, paramType, KokosOwnershipKind.Unowned, _table);
             parameterOwnership.Add(ownership);
-            _scope[parameter.Name] = new KokosBinding(paramType, ownership);
+            var isReadOnly = KokosModifierMapper.IsReadOnlyOf(parameter.Type, _table);
+            parameterReadOnly.Add(isReadOnly);
+            _scope[parameter.Name] = new KokosBinding(paramType, ownership, isReadOnly: isReadOnly);
         }
 
         _currentDeclaredReturnType = node.ReturnType is null ? null : _resolver.Resolve(node.ReturnType);
         _currentDeclaredReturnOwnership = node.ReturnType is null ? null : KokosModifierMapper.OwnershipOf(node.ReturnType, _table);
+        _currentDeclaredReadOnlyReturn = node.ReturnType is null ? null : KokosModifierMapper.IsReadOnlyOf(node.ReturnType, _table);
 
         try
         {
@@ -322,14 +374,18 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             {
                 var importedReturnType = _currentDeclaredReturnType ?? KokosUnknownType.Instance;
                 var importedReturnOwnership = _currentDeclaredReturnOwnership ?? KokosOwnershipKind.Inferred;
+                var importedReturnReadOnly = _currentDeclaredReadOnlyReturn ?? false;
                 CheckCBoundarySignature(node, parameterTypes, parameterOwnership, importedReturnType, importedReturnOwnership);
-                return new KokosFunctionType(parameterTypes, parameterOwnership, importedReturnType, importedReturnOwnership, node);
+                return new KokosFunctionType(parameterTypes, parameterOwnership, importedReturnType, importedReturnOwnership, node,
+                    parameterReadOnly, importedReturnReadOnly);
             }
 
             node.Body!.Accept(this);
             var effectiveReturnType = _currentDeclaredReturnType ?? InferReturnType(node, _currentReturnTypes);
             var effectiveReturnOwnership = _currentDeclaredReturnOwnership
                 ?? InferReturnOwnership(node, _currentReturnOwnerships, effectiveReturnType);
+            var effectiveReturnReadOnly = _currentDeclaredReadOnlyReturn
+                ?? InferReturnReadOnly(_currentReturnReadOnlyValues, effectiveReturnType);
 
             // A function stays implicitly void-like (no requirement) only when it has neither a
             // declared return type nor any return-with-a-value anywhere in its body.
@@ -346,7 +402,8 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             if (node.IsExported)
                 CheckCBoundarySignature(node, parameterTypes, parameterOwnership, effectiveReturnType, effectiveReturnOwnership);
 
-            return new KokosFunctionType(parameterTypes, parameterOwnership, effectiveReturnType, effectiveReturnOwnership, node);
+            return new KokosFunctionType(parameterTypes, parameterOwnership, effectiveReturnType, effectiveReturnOwnership, node,
+                parameterReadOnly, effectiveReturnReadOnly);
         }
         finally
         {
@@ -355,6 +412,8 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             _currentReturnTypes = outerReturnTypes;
             _currentDeclaredReturnOwnership = outerDeclaredReturnOwnership;
             _currentReturnOwnerships = outerReturnOwnerships;
+            _currentDeclaredReadOnlyReturn = outerDeclaredReadOnlyReturn;
+            _currentReturnReadOnlyValues = outerReturnReadOnlyValues;
             _consumed = outerConsumed;
         }
     }
@@ -495,6 +554,18 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         return KokosOwnershipKind.Inferred;
     }
 
+    /// <summary>
+    /// Deliberately *not* the same "every path must agree" rule as <see cref="InferReturnOwnership"/>:
+    /// ownership is an identity (a caller genuinely needs to know whether it's getting an owned or
+    /// unowned reference), so disagreement is ambiguous and a diagnostic; `readonly` is a restriction,
+    /// so the only sound inference is the conservative union — the return is `readonly` the moment
+    /// *any* path could produce a `readonly` value, since a caller that only ever writes through the
+    /// mutable paths would otherwise crash the instant a run happened to take the readonly one (exactly
+    /// the bug this modifier exists to catch at compile time instead).
+    /// </summary>
+    private static bool InferReturnReadOnly(List<bool> returnReadOnlyValues, KokosType effectiveReturnType) =>
+        effectiveReturnType.IsPointerShaped && returnReadOnlyValues.Any(isReadOnly => isReadOnly);
+
     public KokosType VisitParameter(KokosParameterNode node) => _resolver.Resolve(node.Type);
 
     // --- Delegates straight to the resolver for every type-expression node kind ------------------
@@ -549,6 +620,14 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
                 ? inferredOwnership
                 : (variableType.IsPointerShaped ? KokosOwnershipKind.Owned : KokosOwnershipKind.Inferred);
 
+        // Mirrors the ownership defaulting immediately above: an explicit annotation's own `readonly`
+        // bit wins (and is checked for narrowing below); with no annotation at all, `readonly` is
+        // inferred straight from the initializer (so `let y = getStr();` really is `readonly` when
+        // `getStr` always returns one, per InferReturnReadOnly's conservative union).
+        var isReadOnly = node.Type is not null
+            ? KokosModifierMapper.IsReadOnlyOf(node.Type, _table)
+            : TryGetReadOnly(node.Initializer);
+
         if (node.Type is not null)
         {
             if (ownership is KokosOwnershipKind.Owned or KokosOwnershipKind.Unowned or KokosOwnershipKind.Manual
@@ -559,10 +638,12 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             }
 
             CheckNoLeakingWeakening(node.Initializer, ownership, node.NameToken.Span, "This initializer");
+            CheckNoReadOnlyNarrowing(node.Initializer, ownership, isReadOnly, node.NameToken.Span, "This initializer");
         }
 
-        _scope[node.Name] = new KokosBinding(variableType, ownership);
+        _scope[node.Name] = new KokosBinding(variableType, ownership, isReadOnly: isReadOnly);
         _localOwnership[node] = ownership;
+        _localReadOnly[node] = isReadOnly;
         _localTypes[node] = variableType;
 
         if (ownership == KokosOwnershipKind.Owned)
@@ -606,6 +687,11 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             {
                 CheckNoLeakingWeakening(node.Expression, _currentDeclaredReturnOwnership.Value, node.ReturnKeyword.Span, "This return value", exemptStorageBacked: false);
             }
+
+            if (_currentDeclaredReadOnlyReturn is null)
+                _currentReturnReadOnlyValues.Add(TryGetReadOnly(node.Expression));
+            else
+                CheckNoReadOnlyNarrowing(node.Expression, _currentDeclaredReturnOwnership ?? KokosOwnershipKind.Inferred, _currentDeclaredReadOnlyReturn.Value, node.ReturnKeyword.Span, "This return value");
         }
 
         RecordReleasePoint(node);
@@ -768,13 +854,18 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
     }
 
     /// <summary>
-    /// A string literal's Kokos-visible type is exactly `unowned [Int8]` — a UTF-8 byte sequence, per
-    /// spec, with the same runtime shape as any other dynamic array so it can be passed anywhere one
-    /// is expected with zero special-casing. It's never `owned` (there's no allocation a literal's
-    /// reference could meaningfully transfer or free — it's a compile-time global) and never
-    /// `manual` (nothing should ever call `free()` on it). Codegen additionally appends a hidden
-    /// trailing `\0` to the byte buffer (not reflected in `.length`) purely so the raw pointer is
-    /// already a valid C string once converted to `unmanaged`.
+    /// A string literal's Kokos-visible type is exactly `readonly unowned [Int8]` — a UTF-8 byte
+    /// sequence, per spec, with the same runtime shape as any other dynamic array so it can be passed
+    /// anywhere one is expected with zero special-casing. It's never `owned` (there's no allocation a
+    /// literal's reference could meaningfully transfer or free — it's a compile-time global) and never
+    /// `manual` (nothing should ever call `free()` on it). It's always `readonly`: the backing global is
+    /// a real, deduplicated, `IsGlobalConstant` LLVM constant (see
+    /// <see cref="Kokos.CodeGen.KokosCodeGenerator.GetOrCreateStringLiteralEnvelope"/>, in Kokos.CodeGen)
+    /// — writing into it is memory corruption, not just a logic error, which is exactly what
+    /// <see cref="TryGetReadOnly"/>'s literal case and <see cref="VisitAssignment"/>'s write-checks
+    /// exist to catch at compile time. Codegen additionally appends a hidden trailing `\0` to the byte
+    /// buffer (not reflected in `.length`) purely so the raw pointer is already a valid C string once
+    /// converted to `unmanaged`.
     /// </summary>
     public KokosType VisitLiteralString(KokosLiteralStringNode node) =>
         _resolver.Intern(new KokosArrayType(KokosArrayKind.Dynamic, KokosPrimitiveType.Int8));
@@ -1051,6 +1142,69 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
     }
 
     /// <summary>
+    /// Resolves an expression's `readonly`-ness where possible. Unlike <see cref="TryGetOwnership"/>,
+    /// "couldn't determine" collapses naturally to `false` (mutable, the safe assumption when nothing
+    /// says otherwise), so this is a plain bool rather than an out/bool pair. Deliberately *transitive*
+    /// through field and index access — the opposite of how ownership resolves a field/element, which
+    /// is intentionally independent of its container's own ownership — because `readonly` describes
+    /// what you can do through a reference to the *whole pointed-to value*, exactly like C++'s
+    /// <c>const T*</c> propagating constness to everything reachable through it: a field/element is
+    /// `readonly` either because it's individually declared that way, or because the struct/array
+    /// reference it's being read through already is. That transitivity is deliberately gated on the
+    /// field/element's own type being pointer-shaped: reading an `Int` out of a `readonly` struct or a
+    /// `readonly [Int8]` array yields an independent copy with nothing left to alias, so there's no
+    /// aliasing concern left to protect — without this gate, `let str = "hi"; return str[0];` (an
+    /// `Int8`) would be wrongly flagged as narrowing a `readonly` value.
+    /// </summary>
+    private bool TryGetReadOnly(KokosExpressionNode expression) => expression switch
+    {
+        // A string literal's Kokos-visible type is 'readonly unowned [Int8]' — see VisitLiteralString.
+        KokosLiteralStringNode => true,
+
+        KokosIdentifierNode identifier => _scope.TryGetValue(identifier.Name, out var binding) && binding.IsReadOnly,
+
+        KokosMemberAccessNode access when _expressionTypes.TryGetValue(access.Target, out var targetType) && targetType is KokosStructType structType
+            && FindField(structType, access.NameToken, access.MemberName) is { } field =>
+            field.IsReadOnly || (field.Type.IsPointerShaped && TryGetReadOnly(access.Target)),
+
+        KokosIndexNode index when _expressionTypes.TryGetValue(index, out var elementType) && elementType.IsPointerShaped =>
+            TryGetReadOnly(index.Target),
+
+        // A fresh struct/array construction is always a brand-new, mutable allocation — never readonly.
+        KokosCallNode { Callee: KokosIdentifierNode calleeName } when _table.TryGetStruct(calleeName.Name, out _) => false,
+        KokosArrayConstructionNode => false,
+
+        KokosCallNode { Callee: KokosIdentifierNode fnName } when _table.TryGetFunction(fnName.Name, out var fnDecl) =>
+            GetFunctionType(fnDecl).ReturnReadOnly,
+
+        _ => false,
+    };
+
+    /// <summary>
+    /// A `readonly` value can never be implicitly used where a non-`readonly` reference is required —
+    /// there's no way to "cast away" `readonly` — but a non-`readonly` value can always be used where
+    /// `readonly` is expected (plain widening, always safe, per explicit direction). This is a
+    /// *conversion* check (parallel to the existing "cannot use an `unmanaged` reference where
+    /// owned/unowned/manual is expected" checks already at these same call sites), so it only applies
+    /// where the target's `readonly`-ness is already fixed (explicit or positionally defaulted) rather
+    /// than still being inferred from this very source — an unannotated `let`/return has nothing to
+    /// narrow against, since its own `readonly` bit is *becoming* the source's, not being compared to it.
+    ///
+    /// Exempt entirely when the target's ownership is `unmanaged`: that's already Kokos's own opt-out
+    /// of every other tracked safety net (no generation checks, no `free()`/`destroyed()` support), and
+    /// its entire purpose is being a raw escape hatch for C interop — the load-bearing case being
+    /// exactly "pass a string literal straight into an `unmanaged`-parameter C function" (`puts`,
+    /// `strlen`, ...). Layering readonly-narrowing on top would block that basic pattern outright.
+    /// </summary>
+    private void CheckNoReadOnlyNarrowing(KokosExpressionNode source, KokosOwnershipKind targetOwnership, bool targetIsReadOnly, TextSpan span, string context)
+    {
+        if (targetOwnership == KokosOwnershipKind.Unmanaged || targetIsReadOnly || !TryGetReadOnly(source))
+            return;
+
+        _diagnostics.ReportError(span, $"{context} is 'readonly' and cannot be used where a non-readonly reference is required.");
+    }
+
+    /// <summary>
     /// Resolves an expression's ownership where possible: a bound identifier, a direct struct-field
     /// access, a construction call (always fresh and uniquely owned), or an ordinary function call
     /// (whatever the callee's own return ownership resolved to). Anything else (a ternary, an
@@ -1151,6 +1305,16 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
                 $"Cannot assign a value of type '{valueType.DisplayName}' to a target of type '{targetType.DisplayName}'.");
         }
 
+        if (node.Target is KokosIndexNode indexTarget && TryGetReadOnly(indexTarget.Target))
+        {
+            _diagnostics.ReportError(node.EqualsToken.Span,
+                "Cannot write into an element of a 'readonly' array — it may be backed by immutable, read-only data.");
+        }
+        else if (node.Target is KokosMemberAccessNode fieldTarget && TryGetReadOnly(fieldTarget))
+        {
+            _diagnostics.ReportError(node.EqualsToken.Span, "Cannot write into a 'readonly' field.");
+        }
+
         if (TryGetOwnership(node.Target, out var assignmentTargetOwnership)
             && assignmentTargetOwnership is KokosOwnershipKind.Owned or KokosOwnershipKind.Unowned or KokosOwnershipKind.Manual
             && TryGetOwnership(node.Value, out var assignmentSourceOwnership) && assignmentSourceOwnership == KokosOwnershipKind.Unmanaged)
@@ -1160,6 +1324,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         }
 
         CheckNoLeakingWeakening(node.Value, assignmentTargetOwnership, node.EqualsToken.Span, "This assignment");
+        CheckNoReadOnlyNarrowing(node.Value, assignmentTargetOwnership, TryGetReadOnly(node.Target), node.EqualsToken.Span, "This assignment");
 
         if (TryGetOwnership(node.Target, out var targetOwnership) && targetOwnership == KokosOwnershipKind.Owned)
         {
@@ -1212,6 +1377,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             targetType = baseBinding.Type;
             _expressionTypes[node.Target] = targetType;
             _expressionOwnership[node.Target] = baseBinding.Ownership;
+            _expressionReadOnly[node.Target] = baseBinding.IsReadOnly;
 
             if (_consumed.Contains(baseIdentifier.Name))
             {
@@ -1338,6 +1504,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
                 }
 
                 CheckNoLeakingWeakening(argument.Expression, field.Ownership, SpanOf(argument.Expression), "This field value");
+                CheckNoReadOnlyNarrowing(argument.Expression, field.Ownership, field.IsReadOnly, SpanOf(argument.Expression), "This field value");
             }
             else
             {
@@ -1427,6 +1594,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
                     functionType.Declaration.Parameters.Items[i].Type, expectedType, KokosOwnershipKind.Unowned, _table);
 
                 CheckNoLeakingWeakening(argument.Expression, parameterOwnership, SpanOf(argument.Expression), "This argument");
+                CheckNoReadOnlyNarrowing(argument.Expression, parameterOwnership, functionType.ParameterReadOnly[i], SpanOf(argument.Expression), "This argument");
 
                 if (parameterOwnership == KokosOwnershipKind.Owned)
                     MarkTransferred(argument.Expression);

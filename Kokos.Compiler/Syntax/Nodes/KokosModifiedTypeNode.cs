@@ -1,6 +1,11 @@
 namespace Kokos.Compiler.Syntax.Nodes;
 
-/// <summary>An ownership-modified type: <c>owned T</c>, <c>unowned T</c>, or <c>manual T</c>.</summary>
+/// <summary>
+/// A single modifier wrapping a type: an ownership modifier (<c>owned T</c>, <c>unowned T</c>,
+/// <c>manual T</c>, <c>unmanaged T</c>) or <c>readonly T</c>. The two categories are independent and
+/// stackable — <c>readonly unowned T</c> is one of these nested inside another, via
+/// <see cref="InnerType"/>.
+/// </summary>
 public sealed class KokosModifiedTypeNode : KokosTypeNode
 {
     public KokosToken ModifierToken { get; }

@@ -3,16 +3,36 @@
   "name": "Kokos",
   "scopeName": "source.kokos",
   "patterns": [
-    { "include": "#comments" },
-    { "include": "#keywords" },
-    { "include": "#storage-modifiers" },
-    { "include": "#constants" },
-    { "include": "#primitive-types" },
-    { "include": "#strings" },
-    { "include": "#numbers" },
-    { "include": "#function-decl" },
-    { "include": "#type-decl" },
-    { "include": "#operators" }
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#storage-modifiers"
+    },
+    {
+      "include": "#constants"
+    },
+    {
+      "include": "#primitive-types"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#function-decl"
+    },
+    {
+      "include": "#type-decl"
+    },
+    {
+      "include": "#operators"
+    }
   ],
   "repository": {
     "comments": {
@@ -44,7 +64,7 @@
       "patterns": [
         {
           "name": "storage.modifier.kokos",
-          "match": "\\b(value|owned|unowned|manual|unmanaged)\\b"
+          "match": "\\b(value|owned|unowned|manual|unmanaged|readonly)\\b"
         }
       ]
     },
@@ -73,8 +93,12 @@
         {
           "match": "\\b(function)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
           "captures": {
-            "1": { "name": "keyword.other.kokos" },
-            "2": { "name": "entity.name.function.kokos" }
+            "1": {
+              "name": "keyword.other.kokos"
+            },
+            "2": {
+              "name": "entity.name.function.kokos"
+            }
           }
         }
       ]
@@ -84,8 +108,12 @@
         {
           "match": "\\b(type|struct|enum)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
           "captures": {
-            "1": { "name": "keyword.other.kokos" },
-            "2": { "name": "entity.name.type.kokos" }
+            "1": {
+              "name": "keyword.other.kokos"
+            },
+            "2": {
+              "name": "entity.name.type.kokos"
+            }
           }
         }
       ]

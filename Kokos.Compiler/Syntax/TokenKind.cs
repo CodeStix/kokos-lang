@@ -29,6 +29,7 @@ public enum TokenKind
     UnownedKeyword,
     ManualKeyword,
     UnmanagedKeyword,
+    ReadOnlyKeyword,
     DestroyedKeyword,
     FreeKeyword,
     ImportKeyword,
