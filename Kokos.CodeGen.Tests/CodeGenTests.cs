@@ -4,6 +4,7 @@ using Kokos.Compiler.Diagnostics;
 using Kokos.Compiler.Parsing;
 using Kokos.Compiler.Semantics;
 using Kokos.CodeGen;
+using LLVMSharp.Interop;
 using Xunit;
 
 namespace Kokos.CodeGen.Tests;
@@ -34,7 +35,7 @@ public delegate byte NullaryByteFunc();
 
 public class CodeGenTests
 {
-    private static KokosJit GenerateAndJit(string source)
+    private static KokosJit GenerateAndJit(string source, KokosOptimizationLevel optimizationLevel = KokosOptimizationLevel.None)
     {
         var unit = KokosParser.Parse(source, out _);
         var diagnostics = new KokosDiagnosticBag();
@@ -46,6 +47,8 @@ public class CodeGenTests
 
         var generator = new KokosCodeGenerator(table, checker, "test_module");
         var module = generator.Generate(unit);
+
+        KokosOptimizer.Optimize(module, optimizationLevel);
 
         return KokosJit.Create(module, generator.Context);
     }
@@ -965,5 +968,120 @@ public class CodeGenTests
         var main = jit.GetFunction<NullaryLongFunc>("main");
 
         Assert.Equal(300, main());
+    }
+
+    // --- LLVM optimizations (`KokosOptimizer`) ------------------------------------------------------
+
+    [Theory]
+    [InlineData(KokosOptimizationLevel.O1)]
+    [InlineData(KokosOptimizationLevel.O2)]
+    [InlineData(KokosOptimizationLevel.O3)]
+    public void Optimizing_a_pure_arithmetic_function_preserves_its_result(KokosOptimizationLevel level)
+    {
+        using var jit = GenerateAndJit(
+            "export function combine(a: Int, b: Int, c: Int): Int { return (a + b) * c - a; }",
+            level);
+
+        var combine = jit.GetFunction<TernaryLongFunc>("combine");
+
+        Assert.Equal(32, combine(3, 4, 5));
+    }
+
+    [Theory]
+    [InlineData(KokosOptimizationLevel.O1)]
+    [InlineData(KokosOptimizationLevel.O2)]
+    [InlineData(KokosOptimizationLevel.O3)]
+    public void Optimizing_the_owned_static_reassignment_repro_preserves_its_result(KokosOptimizationLevel level)
+    {
+        // Same repro as Reassigning_an_owned_pointer_shaped_optional_static_releases_its_previous_value
+        // — the release-before-overwrite codegen (malloc/free calls, null-guard branches) has to
+        // survive the optimizer's inlining/DCE passes without the JIT-ed result changing.
+        using var jit = GenerateAndJit(
+            """
+            struct Person {
+                age: Int
+            }
+
+            static let person: Person?;
+
+            function overridePerson() {
+                person = Person(age: 150);
+            }
+
+            function takeAndOverridePerson() {
+                let l = person;
+
+                person = Person(age: 300);
+            }
+
+            export function main(): Int {
+                person = Person(age: 200);
+
+                overridePerson();
+                takeAndOverridePerson();
+
+                return person!.age;
+            }
+            """,
+            level);
+
+        var main = jit.GetFunction<NullaryLongFunc>("main");
+
+        Assert.Equal(300, main());
+    }
+
+    [Fact]
+    public void Optimizing_with_level_None_leaves_the_generated_IR_byte_for_byte_unchanged()
+    {
+        var (module, generator) = GenerateModule("export function f(x: Int): Int { return x + 0; }");
+        try
+        {
+            var before = module.PrintToString();
+            KokosOptimizer.Optimize(module, KokosOptimizationLevel.None);
+            var after = module.PrintToString();
+
+            Assert.Equal(before, after);
+        }
+        finally
+        {
+            module.Dispose();
+            generator.Context.Dispose();
+        }
+    }
+
+    [Fact]
+    public void Optimizing_at_O2_actually_changes_the_generated_IR()
+    {
+        // A deliberately unoptimized-looking function (`x + 0`, always simplified away by even the
+        // most basic pass pipeline) — the concrete proof that '-O2' really does run real LLVM passes
+        // over the module rather than silently no-op-ing.
+        var (module, generator) = GenerateModule("export function f(x: Int): Int { return x + 0; }");
+        try
+        {
+            var before = module.PrintToString();
+            KokosOptimizer.Optimize(module, KokosOptimizationLevel.O2);
+            var after = module.PrintToString();
+
+            Assert.NotEqual(before, after);
+        }
+        finally
+        {
+            module.Dispose();
+            generator.Context.Dispose();
+        }
+    }
+
+    private static (LLVMModuleRef Module, KokosCodeGenerator Generator) GenerateModule(string source)
+    {
+        var unit = KokosParser.Parse(source, out _);
+        var diagnostics = new KokosDiagnosticBag();
+        var table = new KokosDeclarationTable(unit, diagnostics);
+        var resolver = new KokosTypeResolver(table, diagnostics);
+        var checker = new KokosTypeChecker(table, resolver, diagnostics);
+        checker.VisitCompilationUnit(unit);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+
+        var generator = new KokosCodeGenerator(table, checker, "test_module");
+        return (generator.Generate(unit), generator);
     }
 }

@@ -10,9 +10,6 @@ namespace Kokos.CodeGen;
 /// </summary>
 public sealed unsafe class KokosJit : IDisposable
 {
-    private static readonly object InitLock = new();
-    private static bool _nativeTargetInitialized;
-
     private readonly LLVMOrcLLJITRef _jit;
 
     private KokosJit(LLVMOrcLLJITRef jit)
@@ -33,7 +30,7 @@ public sealed unsafe class KokosJit : IDisposable
     /// </summary>
     public static KokosJit Create(LLVMModuleRef module, LLVMContextRef context)
     {
-        EnsureNativeTargetInitialized();
+        KokosNativeTarget.EnsureInitialized();
 
         var builder = LLVMOrcLLJITBuilderRef.Create();
         var createError = LLVMOrcLLJITRef.Create(out var jit, builder);
@@ -68,19 +65,6 @@ public sealed unsafe class KokosJit : IDisposable
         ThrowIfError(error, "creating the process dynamic-library search generator");
 
         dylib.AddGenerator(generator);
-    }
-
-    private static void EnsureNativeTargetInitialized()
-    {
-        lock (InitLock)
-        {
-            if (_nativeTargetInitialized)
-                return;
-
-            LLVM.InitializeNativeTarget();
-            LLVM.InitializeNativeAsmPrinter();
-            _nativeTargetInitialized = true;
-        }
     }
 
     /// <summary>Looks up a compiled function by name and returns it as a callable delegate.</summary>

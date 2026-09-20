@@ -11,18 +11,22 @@ function getStr() {
 }
 
 struct Person {
+    name: CString,
     age: Int
 }
 
-static let person: Person?;
+// static let person: Person?;
+
+function createPerson(name: CString) {
+    return Person(name: name, age: 200);
+}
 
 export function main() {
 
-    person = Person(age: 200);
-    person = Person(age: 200);
+    let person = createPerson("stijn2");
+    let person2 = createPerson("stijn3");
 
-    // overridePerson();
-    // takeAndOverridePerson();
-
-    return person!.age;
+    puts(person.name);
+    puts(person2.name);
+    return person.age + person2.age;
 }

@@ -8,13 +8,28 @@ internal class Program
 {
     static int Main(string[] args)
     {
-        if (args.Length < 1)
+        string? path = null;
+        var optimizationLevel = KokosOptimizationLevel.None;
+
+        foreach (var arg in args)
         {
-            Console.Error.WriteLine("Usage: kokos <file.kokos>");
+            if (TryParseOptimizationFlag(arg, out var level))
+                optimizationLevel = level;
+            else if (path is null)
+                path = arg;
+            else
+            {
+                Console.Error.WriteLine($"Unexpected argument '{arg}'.");
+                return 1;
+            }
+        }
+
+        if (path is null)
+        {
+            Console.Error.WriteLine("Usage: kokos <file.kokos> [-O0|-O1|-O2|-O3|--optimize]");
             return 1;
         }
 
-        var path = args[0];
         var source = File.ReadAllText(path);
 
         var unit = KokosParser.Parse(source, out var diagnostics);
@@ -64,7 +79,16 @@ internal class Program
             var generator = new KokosCodeGenerator(table, checker, Path.GetFileNameWithoutExtension(path));
             var module = generator.Generate(unit);
 
-            Console.WriteLine("=== LLVM IR ===");
+            if (optimizationLevel != KokosOptimizationLevel.None)
+            {
+                KokosOptimizer.Optimize(module, optimizationLevel);
+                Console.WriteLine($"=== LLVM IR (optimized, {optimizationLevel}) ===");
+            }
+            else
+            {
+                Console.WriteLine("=== LLVM IR ===");
+            }
+
             Console.WriteLine(module.PrintToString());
 
             using var jit = KokosJit.Create(module, generator.Context);
@@ -79,6 +103,23 @@ internal class Program
         }
 
         return 0;
+    }
+
+    /// <summary>
+    /// Recognizes an optimization-level flag among the CLI arguments: <c>-O0</c>..<c>-O3</c>
+    /// (mirroring clang/opt's own flags), plus <c>-O</c>/<c>--optimize</c> as shorthand for <c>-O2</c>
+    /// — the same "just turn optimizations on" default gcc/clang use for a bare <c>-O</c>.
+    /// </summary>
+    private static bool TryParseOptimizationFlag(string arg, out KokosOptimizationLevel level)
+    {
+        switch (arg)
+        {
+            case "-O0": level = KokosOptimizationLevel.None; return true;
+            case "-O1": level = KokosOptimizationLevel.O1; return true;
+            case "-O" or "-O2" or "--optimize": level = KokosOptimizationLevel.O2; return true;
+            case "-O3": level = KokosOptimizationLevel.O3; return true;
+            default: level = KokosOptimizationLevel.None; return false;
+        }
     }
 
     private static void RunMain(KokosJit jit, KokosType returnType)
