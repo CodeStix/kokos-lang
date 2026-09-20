@@ -35,7 +35,10 @@ public delegate byte NullaryByteFunc();
 
 public class CodeGenTests
 {
-    private static KokosJit GenerateAndJit(string source, KokosOptimizationLevel optimizationLevel = KokosOptimizationLevel.None)
+    private static KokosJit GenerateAndJit(
+        string source,
+        KokosOptimizationLevel optimizationLevel = KokosOptimizationLevel.None,
+        IEnumerable<string>? libraryPaths = null)
     {
         var unit = KokosParser.Parse(source, out _);
         var diagnostics = new KokosDiagnosticBag();
@@ -50,8 +53,11 @@ public class CodeGenTests
 
         KokosOptimizer.Optimize(module, optimizationLevel);
 
-        return KokosJit.Create(module, generator.Context);
+        return KokosJit.Create(module, generator.Context, libraryPaths);
     }
+
+    /// <summary>The checked-in native fixture DLL's path — see Fixtures/native_fixture.c.</summary>
+    private static string NativeFixturePath => Path.Combine(AppContext.BaseDirectory, "Fixtures", "native_fixture.dll");
 
     [Fact]
     public void Add_function_computes_the_correct_sum()
@@ -1083,5 +1089,104 @@ public class CodeGenTests
 
         var generator = new KokosCodeGenerator(table, checker, "test_module");
         return (generator.Generate(unit), generator);
+    }
+
+    // --- Object file emission (`KokosObjectEmitter`) ------------------------------------------------
+
+    [Fact]
+    public void Emitting_an_object_file_writes_a_valid_COFF_object_for_the_host_machine()
+    {
+        var (module, generator) = GenerateModule("export function addTwo(a: Int, b: Int): Int { return a + b; }");
+        var path = Path.Combine(Path.GetTempPath(), $"kokos_test_{Guid.NewGuid():N}.obj");
+        try
+        {
+            KokosObjectEmitter.EmitObjectFile(module, path);
+
+            Assert.True(File.Exists(path));
+
+            // A COFF object's first two bytes are its machine-type field — 0x8664 (little-endian) is
+            // IMAGE_FILE_MACHINE_AMD64, confirming this is a real, host-targeted object file rather
+            // than an empty or garbage one, without needing an external linker just to sanity-check it.
+            var header = new byte[2];
+            using (var stream = File.OpenRead(path))
+                stream.ReadExactly(header);
+
+            Assert.Equal([0x64, 0x86], header);
+        }
+        finally
+        {
+            File.Delete(path);
+            module.Dispose();
+            generator.Context.Dispose();
+        }
+    }
+
+    [Fact]
+    public void Emitting_an_object_file_does_not_require_a_main_function()
+    {
+        // A module meant to be linked into a C program has no reason to have a Kokos 'main' — object
+        // emission must not carry over KokosJit/the CLI's "needs an exported main" assumption.
+        var (module, generator) = GenerateModule("export function helper(x: Int): Int { return x * 2; }");
+        var path = Path.Combine(Path.GetTempPath(), $"kokos_test_{Guid.NewGuid():N}.obj");
+        try
+        {
+            KokosObjectEmitter.EmitObjectFile(module, path);
+
+            Assert.True(File.Exists(path));
+            Assert.True(new FileInfo(path).Length > 0);
+        }
+        finally
+        {
+            File.Delete(path);
+            module.Dispose();
+            generator.Context.Dispose();
+        }
+    }
+
+    // --- Loading a native library into the JIT (`KokosJit.LoadLibrary`) -----------------------------
+
+    [Fact]
+    public void Calling_an_imported_function_without_loading_its_library_fails_to_resolve()
+    {
+        // The unresolved symbol's own name ends up on LLVM's default error reporter (stderr), not in
+        // this exception's message — see KokosJit.Create's doc comment on why this fails as early as
+        // construction (the whole module fails to materialize its very first requested symbol,
+        // 'kokos.init_statics', once anything in it references an unresolvable import).
+        var ex = Assert.Throws<InvalidOperationException>(() => GenerateAndJit(
+            """
+            import function kokos_test_triple(x: Int): Int;
+
+            export function main(): Int { return kokos_test_triple(14); }
+            """));
+
+        Assert.Contains("kokos.init_statics", ex.Message);
+    }
+
+    [Fact]
+    public void Loading_a_native_library_resolves_a_function_it_imports()
+    {
+        using var jit = GenerateAndJit(
+            """
+            import function kokos_test_triple(x: Int): Int;
+
+            export function main(): Int { return kokos_test_triple(14); }
+            """,
+            libraryPaths: [NativeFixturePath]);
+
+        var main = jit.GetFunction<NullaryLongFunc>("main");
+
+        Assert.Equal(42, main());
+    }
+
+    [Fact]
+    public void Loading_a_native_library_that_does_not_exist_reports_a_clear_error()
+    {
+        var missingPath = Path.Combine(Path.GetTempPath(), $"kokos_test_missing_{Guid.NewGuid():N}.dll");
+
+        var ex = Assert.Throws<InvalidOperationException>(() => GenerateAndJit(
+            "export function main(): Int { return 0; }",
+            libraryPaths: [missingPath]));
+
+        Assert.Contains(missingPath, ex.Message);
     }
 }

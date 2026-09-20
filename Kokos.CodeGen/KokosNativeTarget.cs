@@ -25,4 +25,26 @@ internal static class KokosNativeTarget
             _initialized = true;
         }
     }
+
+    /// <summary>
+    /// A portable (no host-specific ISA extensions baked in) target machine for the host triple —
+    /// shared by <see cref="KokosOptimizer"/> (target-aware optimization passes) and
+    /// <see cref="KokosObjectEmitter"/> (actual object-code emission), so both agree on exactly what
+    /// "the target" means. The caller owns disposal — see <see cref="DisposeTargetMachine"/>.
+    /// </summary>
+    public static LLVMTargetMachineRef CreateHostTargetMachine(LLVMCodeGenOptLevel level = LLVMCodeGenOptLevel.LLVMCodeGenLevelDefault)
+    {
+        EnsureInitialized();
+
+        var triple = LLVMTargetRef.DefaultTriple;
+        var target = LLVMTargetRef.GetTargetFromTriple(triple);
+        return target.CreateTargetMachine(triple, "generic", "", level, LLVMRelocMode.LLVMRelocDefault, LLVMCodeModel.LLVMCodeModelDefault);
+    }
+
+    /// <summary>
+    /// <see cref="LLVMTargetMachineRef"/> isn't <see cref="IDisposable"/> in LLVMSharp — this is the
+    /// one place the raw pointer disposal call lives, so nothing else needs an `unsafe` context just
+    /// to clean up a target machine it got from <see cref="CreateHostTargetMachine"/>.
+    /// </summary>
+    public static unsafe void DisposeTargetMachine(LLVMTargetMachineRef targetMachine) => LLVM.DisposeTargetMachine(targetMachine);
 }

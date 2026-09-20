@@ -27,8 +27,14 @@ public sealed unsafe class KokosJit : IDisposable
     /// <c>{ ret void }</c> when there are no `static let` initializers at all), so this is always safe
     /// and needs no cooperation from any caller: static initialization now unconditionally happens
     /// before any other compiled function can possibly run.
+    ///
+    /// <paramref name="libraryPaths"/> (if given) are loaded — see <see cref="LoadLibrary"/> — before
+    /// that initializer lookup, not after: ORC compiles a whole thread-safe module together the first
+    /// time *any* symbol from it is requested, so an `import function` resolving to one of these
+    /// libraries must already be resolvable by the time this method's own internal lookup runs, not
+    /// just by the time the caller gets a `KokosJit` back to call <see cref="LoadLibrary"/> on.
     /// </summary>
-    public static KokosJit Create(LLVMModuleRef module, LLVMContextRef context)
+    public static KokosJit Create(LLVMModuleRef module, LLVMContextRef context, IEnumerable<string>? libraryPaths = null)
     {
         KokosNativeTarget.EnsureInitialized();
 
@@ -44,11 +50,19 @@ public sealed unsafe class KokosJit : IDisposable
 
         AddProcessSymbolGenerator(jit.MainJITDylib);
 
+        var result = new KokosJit(jit);
+
+        if (libraryPaths is not null)
+        {
+            foreach (var libraryPath in libraryPaths)
+                result.LoadLibrary(libraryPath);
+        }
+
         var initLookupError = jit.Lookup(out var initAddress, KokosCodeGenerator.StaticInitializerFunctionName);
         ThrowIfError(initLookupError, $"looking up '{KokosCodeGenerator.StaticInitializerFunctionName}'");
         Marshal.GetDelegateForFunctionPointer<Action>(new IntPtr(unchecked((long)initAddress)))();
 
-        return new KokosJit(jit);
+        return result;
     }
 
     /// <summary>
@@ -65,6 +79,33 @@ public sealed unsafe class KokosJit : IDisposable
         ThrowIfError(error, "creating the process dynamic-library search generator");
 
         dylib.AddGenerator(generator);
+    }
+
+    /// <summary>
+    /// Loads a native library (a DLL on Windows) into the JIT's symbol search path, so an
+    /// `import function` declaration whose implementation lives in that library — rather than
+    /// already loaded into this .NET host process, unlike <see cref="AddProcessSymbolGenerator"/>'s
+    /// process-wide symbols — resolves correctly. Safe to call more than once to load several
+    /// libraries. Prefer passing every library a module needs to <see cref="Create"/> up front rather
+    /// than calling this afterward — ORC compiles a whole thread-safe module together the first time
+    /// any symbol from it is requested, so a library loaded only after that first lookup already
+    /// happened (e.g. after <see cref="Create"/> returns) is too late for that module's own imports.
+    /// </summary>
+    public void LoadLibrary(string path)
+    {
+        var pathPtr = (sbyte*)Marshal.StringToHGlobalAnsi(path);
+        try
+        {
+            LLVMOrcOpaqueDefinitionGenerator* generator;
+            var error = LLVM.OrcCreateDynamicLibrarySearchGeneratorForPath(&generator, pathPtr, _jit.GlobalPrefix, null, null);
+            ThrowIfError(error, $"loading library '{path}'");
+
+            _jit.MainJITDylib.AddGenerator(generator);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal((IntPtr)pathPtr);
+        }
     }
 
     /// <summary>Looks up a compiled function by name and returns it as a callable delegate.</summary>

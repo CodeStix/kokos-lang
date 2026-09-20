@@ -23,4 +23,10 @@
     <ProjectReference Include="..\Kokos.CodeGen\Kokos.CodeGen.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="Fixtures\native_fixture.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
 </Project>

@@ -9,14 +9,34 @@ internal class Program
     static int Main(string[] args)
     {
         string? path = null;
+        string? emitObjectPath = null;
+        var libraryPaths = new List<string>();
         var optimizationLevel = KokosOptimizationLevel.None;
 
-        foreach (var arg in args)
+        for (var i = 0; i < args.Length; i++)
         {
+            var arg = args[i];
+
             if (TryParseOptimizationFlag(arg, out var level))
+            {
                 optimizationLevel = level;
+            }
+            else if (arg is "--emit-object" or "-c")
+            {
+                if (!TryTakeValue(args, ref i, arg, out emitObjectPath))
+                    return 1;
+            }
+            else if (arg is "--library" or "-l")
+            {
+                if (!TryTakeValue(args, ref i, arg, out var libraryPath))
+                    return 1;
+
+                libraryPaths.Add(libraryPath);
+            }
             else if (path is null)
+            {
                 path = arg;
+            }
             else
             {
                 Console.Error.WriteLine($"Unexpected argument '{arg}'.");
@@ -26,7 +46,8 @@ internal class Program
 
         if (path is null)
         {
-            Console.Error.WriteLine("Usage: kokos <file.kokos> [-O0|-O1|-O2|-O3|--optimize]");
+            Console.Error.WriteLine(
+                "Usage: kokos <file.kokos> [-O0|-O1|-O2|-O3|--optimize] [--emit-object <file.obj>] [--library <path> ...]");
             return 1;
         }
 
@@ -53,25 +74,35 @@ internal class Program
             return 1;
         }
 
-        var mainEntry = checker.FunctionTypes.FirstOrDefault(entry => entry.Key.Name == "main");
-        if (mainEntry.Key is null)
+        // Emitting an object file is a "compile it for someone else to link" mode, not "run it here" —
+        // a module meant to be linked into a C program has no reason to have a Kokos 'main' at all, so
+        // that requirement only applies once we actually intend to JIT and run it below.
+        KokosFunctionType? mainType = null;
+        if (emitObjectPath is null)
         {
-            Console.Error.WriteLine("No 'main' function found — nothing to run.");
-            return 1;
-        }
+            var mainEntry = checker.FunctionTypes.FirstOrDefault(entry => entry.Key.Name == "main");
+            if (mainEntry.Key is null)
+            {
+                Console.Error.WriteLine("No 'main' function found — nothing to run.");
+                return 1;
+            }
 
-        if (mainEntry.Value.ParameterTypes.Count > 0)
-        {
-            Console.Error.WriteLine("'main' must take no parameters.");
-            return 1;
-        }
+            if (mainEntry.Value.ParameterTypes.Count > 0)
+            {
+                Console.Error.WriteLine("'main' must take no parameters.");
+                return 1;
+            }
 
-        // Only an 'export'-marked function is a public symbol of the compiled module — running 'main'
-        // from here is exactly the same relationship as a C caller invoking an exported function.
-        if (!mainEntry.Key.IsExported)
-        {
-            Console.Error.WriteLine("'main' must be marked 'export' to be run (e.g. 'export function main(): Int { ... }').");
-            return 1;
+            // Only an 'export'-marked function is a public symbol of the compiled module — running
+            // 'main' from here is exactly the same relationship as a C caller invoking an exported
+            // function.
+            if (!mainEntry.Key.IsExported)
+            {
+                Console.Error.WriteLine("'main' must be marked 'export' to be run (e.g. 'export function main(): Int { ... }').");
+                return 1;
+            }
+
+            mainType = mainEntry.Value;
         }
 
         try
@@ -91,10 +122,17 @@ internal class Program
 
             Console.WriteLine(module.PrintToString());
 
-            using var jit = KokosJit.Create(module, generator.Context);
+            if (emitObjectPath is not null)
+            {
+                KokosObjectEmitter.EmitObjectFile(module, emitObjectPath);
+                Console.WriteLine($"=== Wrote object file: {emitObjectPath} ===");
+                return 0;
+            }
+
+            using var jit = KokosJit.Create(module, generator.Context, libraryPaths);
 
             Console.WriteLine("=== Running ===");
-            RunMain(jit, mainEntry.Value.ReturnType);
+            RunMain(jit, mainType!.ReturnType);
         }
         catch (Exception ex) when (ex is NotSupportedException or InvalidOperationException)
         {
@@ -120,6 +158,20 @@ internal class Program
             case "-O3": level = KokosOptimizationLevel.O3; return true;
             default: level = KokosOptimizationLevel.None; return false;
         }
+    }
+
+    /// <summary>Consumes the next argument as a flag's value (e.g. <c>--library foo.dll</c>), reporting a clear error if the flag is the last argument.</summary>
+    private static bool TryTakeValue(string[] args, ref int i, string flag, out string value)
+    {
+        if (i + 1 >= args.Length)
+        {
+            Console.Error.WriteLine($"'{flag}' requires a value.");
+            value = "";
+            return false;
+        }
+
+        value = args[++i];
+        return true;
     }
 
     private static void RunMain(KokosJit jit, KokosType returnType)

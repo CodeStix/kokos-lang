@@ -22,18 +22,7 @@ public static unsafe class KokosOptimizer
         if (level == KokosOptimizationLevel.None)
             return;
 
-        KokosNativeTarget.EnsureInitialized();
-
-        var triple = LLVMTargetRef.DefaultTriple;
-        var target = LLVMTargetRef.GetTargetFromTriple(triple);
-        var targetMachine = target.CreateTargetMachine(
-            triple,
-            "generic",
-            "",
-            LLVMCodeGenOptLevel.LLVMCodeGenLevelDefault,
-            LLVMRelocMode.LLVMRelocDefault,
-            LLVMCodeModel.LLVMCodeModelDefault);
-
+        var targetMachine = KokosNativeTarget.CreateHostTargetMachine();
         var options = LLVM.CreatePassBuilderOptions();
         try
         {
@@ -42,7 +31,7 @@ public static unsafe class KokosOptimizer
         finally
         {
             LLVM.DisposePassBuilderOptions(options);
-            LLVM.DisposeTargetMachine(targetMachine);
+            KokosNativeTarget.DisposeTargetMachine(targetMachine);
         }
     }
 
