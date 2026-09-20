@@ -1441,12 +1441,25 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
 
         if (TryGetOwnership(node.Target, out var targetOwnership) && targetOwnership == KokosOwnershipKind.Owned)
         {
-            // A fresh value is being written here — clear any stale "moved" marker for this exact
-            // target first (this is what makes reassignment/refilling a moved-out field legal again).
             if (node.Target is KokosIdentifierNode targetIdentifier)
+            {
+                // Overwriting a still-whole owned binding (one that hasn't already been moved out)
+                // drops the only reference to its current value — record a release point so codegen
+                // frees it right before the new value is stored. Unlike RecordReleasePoint's
+                // scope-exit release, this deliberately isn't restricted to locals: a static persists
+                // across calls, so overwriting one without freeing its old value would leak it, not
+                // just leave it live until the function returns.
+                if (targetType.IsPointerShaped && !_consumed.Contains(targetIdentifier.Name))
+                    _releasePoints[node] = [targetIdentifier.Name];
+
+                // A fresh value is being written here — clear any stale "moved" marker for this exact
+                // target first (this is what makes reassignment/refilling a moved-out field legal again).
                 _consumed.RemoveWhere(entry => entry == targetIdentifier.Name || entry.StartsWith(targetIdentifier.Name + ".", StringComparison.Ordinal));
+            }
             else if (node.Target is KokosMemberAccessNode { Target: KokosIdentifierNode baseId } targetAccess)
+            {
                 _consumed.Remove($"{baseId.Name}.{targetAccess.MemberName}");
+            }
 
             MarkTransferred(node.Value);
         }

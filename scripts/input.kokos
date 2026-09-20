@@ -16,25 +16,13 @@ struct Person {
 
 static let person: Person?;
 
-function overridePerson() {
-    // Bug 1: person will be overriden, meaning that the previous 'owned Person' is now leaked because a free statement isn't generated for the previous value
-    person = Person(age: 150);
-}
-
-function takeAndOverridePerson() {
-    // Bug 1: In this function the correct behaviour is simulated, person has moved into l and gets freed at the end of the function correctly
-    // Bug 2: This assignedment causes: Failed to compile or run: KokosOptionalType ('Person?') has no envelope body representation. 
-    let l = person;
-
-    person = Person(age: 300);
-}
-
 export function main() {
 
     person = Person(age: 200);
+    person = Person(age: 200);
 
-    overridePerson();
-    takeAndOverridePerson();
+    // overridePerson();
+    // takeAndOverridePerson();
 
     return person!.age;
 }

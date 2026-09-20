@@ -129,6 +129,11 @@ public sealed class KokosLlvmTypeMapper
     {
         KokosStructType structType => MapStructBody(structType),
         KokosArrayType arrayType => MapArrayBody(arrayType),
+        // A pointer-shaped optional reuses its inner type's own representation outright (see `Map`),
+        // so its envelope — the allocation an `owned Person?` may or may not be pointing at — is
+        // exactly the inner type's own envelope. A value-shaped optional never reaches here: it isn't
+        // pointer-shaped, so it's never tracked for ownership/release at all.
+        KokosOptionalType { ReusesInnerPointer: true } optionalType => MapBody(optionalType.InnerType),
         _ => throw new NotSupportedException($"{type.GetType().Name} ('{type.DisplayName}') has no envelope body representation."),
     };
 

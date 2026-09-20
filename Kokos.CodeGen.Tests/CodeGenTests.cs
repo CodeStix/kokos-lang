@@ -922,4 +922,48 @@ public class CodeGenTests
 
         Assert.Equal(5, main());
     }
+
+    [Fact]
+    public void Reassigning_an_owned_pointer_shaped_optional_static_releases_its_previous_value()
+    {
+        // The exact reported repro: overriding an owned static must free its previous value (rather
+        // than silently leaking it), and moving a static's value out into a local (`let l = person;`)
+        // must correctly release that local at the end of its function — which requires an optional's
+        // envelope representation to actually exist (KokosLlvmTypeMapper.MapBody previously threw for
+        // KokosOptionalType). Neither behavior can be observed directly from a return value here (no
+        // leak/free detector), but this at minimum proves both code paths compile and run without
+        // crashing (the original `MapBody` exception, or a null-envelope dereference on the very
+        // first, still-null assignment) and produce the expected final value.
+        using var jit = GenerateAndJit(
+            """
+            struct Person {
+                age: Int
+            }
+
+            static let person: Person?;
+
+            function overridePerson() {
+                person = Person(age: 150);
+            }
+
+            function takeAndOverridePerson() {
+                let l = person;
+
+                person = Person(age: 300);
+            }
+
+            export function main(): Int {
+                person = Person(age: 200);
+
+                overridePerson();
+                takeAndOverridePerson();
+
+                return person!.age;
+            }
+            """);
+
+        var main = jit.GetFunction<NullaryLongFunc>("main");
+
+        Assert.Equal(300, main());
+    }
 }

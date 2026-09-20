@@ -581,6 +581,15 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         if (node.Target is KokosIdentifierNode identifier)
         {
             var (pointer, _, targetOwnership, kokosType) = _scope[identifier.Name];
+
+            // Overwriting a still-whole owned binding drops the only reference to whatever it
+            // currently holds — release that old value right before the new one is stored (see
+            // KokosTypeChecker.VisitAssignment, which only records this release point when the
+            // target wasn't already moved out). This runs for statics too: unlike a scope-exit
+            // release, a static persists across calls, so skipping this would leak its old value
+            // every time it's reassigned.
+            EmitReleasesFor(node);
+
             var converted = ConvertOwnership(value, sourceOwnership, targetOwnership, sourceType, kokosType);
             _builder.BuildStore(converted, pointer);
             return converted;
@@ -1157,9 +1166,36 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         {
             var binding = _scope[name];
             var envelopePointer = _builder.BuildLoad2(binding.Type, binding.Pointer, "release.load");
-            var envelopeType = _typeMapper.MapEnvelope(binding.KokosType);
-            EmitRelease(envelopePointer, envelopeType);
+            EmitReleaseGuardingNull(envelopePointer, binding.KokosType);
         }
+    }
+
+    /// <summary>
+    /// Releases an owned pointer-shaped value, guarding against a null "no value" pointer-shaped
+    /// optional rather than blindly dereferencing it to read/bump its generation. A non-optional owned
+    /// pointer is guaranteed non-null (a pointer-shaped static/local can't go without an initializer —
+    /// see the optional-values phase), so it always takes the unconditional path.
+    /// </summary>
+    private void EmitReleaseGuardingNull(LLVMValueRef envelopePointer, KokosType kokosType)
+    {
+        var envelopeType = _typeMapper.MapEnvelope(kokosType);
+
+        if (kokosType is not KokosOptionalType { ReusesInnerPointer: true })
+        {
+            EmitRelease(envelopePointer, envelopeType);
+            return;
+        }
+
+        var isNull = _builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, envelopePointer, LLVMValueRef.CreateConstNull(envelopePointer.TypeOf), "release.isnull");
+        var releaseBlock = _currentFunction.AppendBasicBlock("release.value");
+        var continueBlock = _currentFunction.AppendBasicBlock("release.done");
+        BuildCondBr(isNull, continueBlock, releaseBlock);
+
+        PositionAtEnd(releaseBlock);
+        EmitRelease(envelopePointer, envelopeType);
+        BuildBr(continueBlock);
+
+        PositionAtEnd(continueBlock);
     }
 
     public LLVMValueRef VisitCall(KokosCallNode node)
