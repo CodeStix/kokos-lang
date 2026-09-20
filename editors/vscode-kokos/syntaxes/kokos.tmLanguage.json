@@ -1,0 +1,129 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Kokos",
+  "scopeName": "source.kokos",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#keywords" },
+    { "include": "#storage-modifiers" },
+    { "include": "#constants" },
+    { "include": "#primitive-types" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#function-decl" },
+    { "include": "#type-decl" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.kokos",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.kokos",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.kokos",
+          "match": "\\b(if|else|while|then|return)\\b"
+        },
+        {
+          "name": "keyword.other.kokos",
+          "match": "\\b(function|let|static|type|opaque|enum|struct|import|export|destroyed|free)\\b"
+        }
+      ]
+    },
+    "storage-modifiers": {
+      "patterns": [
+        {
+          "name": "storage.modifier.kokos",
+          "match": "\\b(value|owned|unowned|manual|unmanaged)\\b"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.boolean.kokos",
+          "match": "\\b(true|false)\\b"
+        }
+      ]
+    },
+    "primitive-types": {
+      "patterns": [
+        {
+          "name": "support.type.primitive.kokos",
+          "match": "\\b(Int|Int8|Int16|Int32|Int64|UInt|UInt8|UInt16|UInt32|UInt64|Float|Float32|Float64|Bool)\\b"
+        },
+        {
+          "name": "support.type.kokos",
+          "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+        }
+      ]
+    },
+    "function-decl": {
+      "patterns": [
+        {
+          "match": "\\b(function)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": { "name": "keyword.other.kokos" },
+            "2": { "name": "entity.name.function.kokos" }
+          }
+        }
+      ]
+    },
+    "type-decl": {
+      "patterns": [
+        {
+          "match": "\\b(type|struct|enum)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": { "name": "keyword.other.kokos" },
+            "2": { "name": "entity.name.type.kokos" }
+          }
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.kokos",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.kokos",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.kokos",
+          "match": "\\b[0-9][0-9_]*(\\.[0-9][0-9_]*)?\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.kokos",
+          "match": "(==|!=|<=|>=|&&|\\|\\||->|=>|::|[+\\-*/%=<>!.:#])"
+        },
+        {
+          "name": "punctuation.separator.kokos",
+          "match": "[,;]"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "name": "vscode-kokos",
+  "displayName": "Kokos",
+  "description": "Syntax highlighting and compiler-backed diagnostics for the Kokos language.",
+  "version": "0.0.1",
+  "private": true,
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Programming Languages"],
+  "activationEvents": ["onLanguage:kokos"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "kokos",
+        "aliases": ["Kokos", "kokos"],
+        "extensions": [".kokos"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "kokos",
+        "scopeName": "source.kokos",
+        "path": "./syntaxes/kokos.tmLanguage.json"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}

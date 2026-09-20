@@ -133,3 +133,8 @@ $RECYCLE.BIN/
 _NCrunch*
 
 .vs
+
+# Node / VS Code extension build output
+node_modules/
+out/
+*.vsix
