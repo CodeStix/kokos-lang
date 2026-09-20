@@ -1077,6 +1077,47 @@ public class CodeGenTests
         }
     }
 
+    [Fact]
+    public void Optimizing_at_O2_does_not_eliminate_the_release_of_an_owned_array_passed_to_an_import()
+    {
+        // Regression test: LLVM's optimizer recognizes a direct call to '@free' (matching libc's name
+        // via TargetLibraryInfo) and, once it can prove the freed allocation doesn't escape (a
+        // non-capturing 'unmanaged' C import like this one doesn't retain the pointer), treats the
+        // whole allocation as a non-escaping heap object it's free to delete entirely — including the
+        // 'free' call itself, since C's memory model treats a missed deallocation as merely a leak,
+        // not a correctness violation. That's wrong for Kokos: 'owned' is supposed to guarantee
+        // deterministic release. KokosCodeGenerator routes every release through a `noinline`
+        // 'kokos.free' wrapper specifically so the optimizer can't make this call, and this asserts
+        // that wrapper call is still present (and 'free' is still reachable through it) after '-O2'.
+        var (module, generator) = GenerateModule(
+            """
+            import(c) function puts(str: unmanaged [Int8]): Int;
+
+            export function main() {
+                let l: Int8 = 0;
+                let input = [l # 100];
+                input[0] = 65;
+                puts(input);
+            }
+            """);
+        try
+        {
+            KokosOptimizer.Optimize(module, KokosOptimizationLevel.O2);
+            var ir = module.PrintToString();
+
+            // Two releases survive: the element buffer and the envelope wrapping it — see
+            // Releasing_a_dynamic_array_frees_both_the_element_buffer_and_the_envelope below for the
+            // dedicated regression test covering that split.
+            Assert.Equal(2, CountOccurrences(ir, "call void @kokos.free"));
+            Assert.Contains("declare void @free(", ir);
+        }
+        finally
+        {
+            module.Dispose();
+            generator.Context.Dispose();
+        }
+    }
+
     private static (LLVMModuleRef Module, KokosCodeGenerator Generator) GenerateModule(string source)
     {
         var unit = KokosParser.Parse(source, out _);

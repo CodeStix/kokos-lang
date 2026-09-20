@@ -423,7 +423,8 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
                 var importedReturnType = _currentDeclaredReturnType ?? KokosUnknownType.Instance;
                 var importedReturnOwnership = _currentDeclaredReturnOwnership ?? KokosOwnershipKind.Inferred;
                 var importedReturnReadOnly = _currentDeclaredReadOnlyReturn ?? false;
-                CheckCBoundarySignature(node, parameterTypes, parameterOwnership, importedReturnType, importedReturnOwnership);
+                if (node.IsCAbi)
+                    CheckCBoundarySignature(node, parameterTypes, parameterOwnership, importedReturnType, importedReturnOwnership);
                 return new KokosFunctionType(parameterTypes, parameterOwnership, importedReturnType, importedReturnOwnership, node,
                     parameterReadOnly, importedReturnReadOnly);
             }
@@ -447,7 +448,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             RecordReleasePoint(node);
             CheckStaticVariablesReassigned(node.NameToken.Span);
 
-            if (node.IsExported)
+            if (node.IsExported && node.IsCAbi)
                 CheckCBoundarySignature(node, parameterTypes, parameterOwnership, effectiveReturnType, effectiveReturnOwnership);
 
             return new KokosFunctionType(parameterTypes, parameterOwnership, effectiveReturnType, effectiveReturnOwnership, node,
@@ -467,11 +468,16 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
     }
 
     /// <summary>
-    /// The signature rule for both `import` and `export`: every parameter and the return must be
-    /// something the platform C calling convention already handles correctly with no extra ABI-lowering
-    /// work — a primitive/`Bool` passed by value, or a pointer-shaped type with `unmanaged` ownership.
-    /// Rejects `owned`/`unowned`/`manual` (generation-tracked shapes C knows nothing about) and any
-    /// by-value struct/array (real C-ABI aggregate classification is a separate future phase).
+    /// The signature rule for a C-ABI `import(c)`/`export(c)` (see
+    /// <see cref="KokosFunctionNode.IsCAbi"/>): every parameter and the return must be something the
+    /// platform C calling convention already handles correctly with no extra ABI-lowering work — a
+    /// primitive/`Bool` passed by value, or a pointer-shaped type with `unmanaged` ownership. Rejects
+    /// `owned`/`unowned`/`manual` (generation-tracked shapes C knows nothing about) and any by-value
+    /// struct/array (real C-ABI aggregate classification is a separate future phase).
+    ///
+    /// A plain `import`/`export` (no `(c)`) skips this entirely — it's understood to link only
+    /// against another Kokos-compiled module, which agrees with this one on every internal
+    /// representation (generation-tracked references included), so nothing here applies.
     /// </summary>
     private void CheckCBoundarySignature(
         KokosFunctionNode node,

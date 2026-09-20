@@ -10,10 +10,17 @@ namespace Kokos.Compiler.Syntax.Nodes;
 /// all — <see cref="Body"/> is null and <see cref="SemicolonToken"/> takes its place instead. Every
 /// other function (plain, or <c>export</c>) always has a real <see cref="Body"/> and a null
 /// <see cref="SemicolonToken"/>.
+///
+/// <see cref="LeadingKeyword"/> may itself carry an ABI marker in parentheses — <c>import(c)</c>/
+/// <c>export(c)</c> — see <see cref="IsCAbi"/>. Only meaningful alongside a leading keyword; a plain
+/// function has no ABI tokens at all.
 /// </summary>
 public sealed class KokosFunctionNode : KokosMemberNode
 {
     public KokosToken? LeadingKeyword { get; }
+    public KokosToken? AbiOpenParenToken { get; }
+    public KokosToken? AbiNameToken { get; }
+    public KokosToken? AbiCloseParenToken { get; }
     public KokosToken FunctionKeyword { get; }
     public KokosToken NameToken { get; }
     public string Name => NameToken.Text;
@@ -28,8 +35,20 @@ public sealed class KokosFunctionNode : KokosMemberNode
     public bool IsExported => LeadingKeyword?.Kind == TokenKind.ExportKeyword;
     public bool IsImported => LeadingKeyword?.Kind == TokenKind.ImportKeyword;
 
+    /// <summary>
+    /// True when this import/export explicitly declares the C ABI via <c>(c)</c> — every parameter
+    /// and the return must then be C-calling-convention-compatible (see
+    /// <c>KokosTypeChecker.CheckCBoundarySignature</c>). False (the default — no <c>(...)</c> at all)
+    /// means the Kokos ABI: any type Kokos itself can represent may cross this boundary, since it's
+    /// understood to link only against another Kokos-compiled module, not arbitrary C code.
+    /// </summary>
+    public bool IsCAbi => AbiNameToken?.Text == "c";
+
     public KokosFunctionNode(
         KokosToken? leadingKeyword,
+        KokosToken? abiOpenParenToken,
+        KokosToken? abiNameToken,
+        KokosToken? abiCloseParenToken,
         KokosToken functionKeyword,
         KokosToken nameToken,
         KokosToken openParenToken,
@@ -41,6 +60,9 @@ public sealed class KokosFunctionNode : KokosMemberNode
         KokosToken? semicolonToken)
     {
         LeadingKeyword = leadingKeyword;
+        AbiOpenParenToken = abiOpenParenToken;
+        AbiNameToken = abiNameToken;
+        AbiCloseParenToken = abiCloseParenToken;
         FunctionKeyword = functionKeyword;
         NameToken = nameToken;
         OpenParenToken = openParenToken;
@@ -52,6 +74,9 @@ public sealed class KokosFunctionNode : KokosMemberNode
         SemicolonToken = semicolonToken;
 
         AddChild(leadingKeyword);
+        AddChild(abiOpenParenToken);
+        AddChild(abiNameToken);
+        AddChild(abiCloseParenToken);
         AddChild(functionKeyword);
         AddChild(nameToken);
         AddChild(openParenToken);

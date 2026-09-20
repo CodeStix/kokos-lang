@@ -108,10 +108,31 @@ public sealed class KokosParser
     /// pattern as <c>opaque type</c>/<c>value struct</c>) changes how the body is parsed: <c>import</c>
     /// declares an existing native function with no body at all (just a trailing <c>;</c>); everything
     /// else, including <c>export</c>, is an ordinary function with a real block body.
+    ///
+    /// That leading keyword may itself be followed by an ABI marker in parentheses, e.g.
+    /// <c>import(c)</c>/<c>export(c)</c> — see <see cref="KokosFunctionNode.IsCAbi"/>. Omitting it
+    /// (just <c>import</c>/<c>export</c> alone) means the Kokos ABI; only <c>c</c> is recognized today.
     /// </summary>
     private KokosFunctionNode ParseFunctionDeclaration()
     {
         var leadingKeyword = Current.Kind is TokenKind.ExportKeyword or TokenKind.ImportKeyword ? Advance() : null;
+
+        KokosToken? abiOpenParen = null;
+        KokosToken? abiName = null;
+        KokosToken? abiCloseParen = null;
+        if (leadingKeyword is not null && Current.Kind == TokenKind.OpenParen)
+        {
+            abiOpenParen = Advance();
+            abiName = Expect(TokenKind.Identifier, "an ABI name (e.g. 'c')");
+            if (abiName.Text != "c")
+            {
+                _diagnostics.ReportError(abiName.Span,
+                    $"Unknown ABI '{abiName.Text}' — only 'c' is supported (omit the '(...)' entirely for the default Kokos ABI).");
+            }
+
+            abiCloseParen = Expect(TokenKind.CloseParen, "')'");
+        }
+
         var functionKeyword = Expect(TokenKind.FunctionKeyword, "'function'");
         var name = Expect(TokenKind.Identifier, "a function name");
         var openParen = Expect(TokenKind.OpenParen, "'('");
@@ -133,7 +154,7 @@ public sealed class KokosParser
         else
             body = ParseBlock();
 
-        return new KokosFunctionNode(leadingKeyword, functionKeyword, name, openParen, parameters, closeParen, colon, returnType, body, semicolon);
+        return new KokosFunctionNode(leadingKeyword, abiOpenParen, abiName, abiCloseParen, functionKeyword, name, openParen, parameters, closeParen, colon, returnType, body, semicolon);
     }
 
     private KokosParameterNode ParseParameter()

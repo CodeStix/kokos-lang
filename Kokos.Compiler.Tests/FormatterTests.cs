@@ -462,4 +462,50 @@ public class FormatterTests
             """,
             KokosFormatter.Format(unit));
     }
+
+    [Fact]
+    public void Formats_import_and_export_with_a_C_ABI_marker()
+    {
+        var unit = KokosParser.Parse(
+            """
+            import(c)   function puts(str: unmanaged [Int8]): Int;
+            export(c)   function callFromC(): Int { return 0; }
+            """,
+            out var diagnostics);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+
+        Assert.Equal(
+            """
+            import(c) function puts(str: unmanaged [Int8]): Int;
+
+            export(c) function callFromC(): Int {
+                return 0;
+            }
+
+            """,
+            KokosFormatter.Format(unit));
+    }
+
+    [Fact]
+    public void Formats_a_bare_import_export_without_an_ABI_marker()
+    {
+        var unit = KokosParser.Parse(
+            """
+            import function concat(a: String, b: String): String;
+            export function hello(): Int { return 0; }
+            """,
+            out var diagnostics);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+
+        Assert.Equal(
+            """
+            import function concat(a: String, b: String): String;
+
+            export function hello(): Int {
+                return 0;
+            }
+
+            """,
+            KokosFormatter.Format(unit));
+    }
 }

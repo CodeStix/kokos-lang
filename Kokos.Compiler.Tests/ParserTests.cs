@@ -667,4 +667,63 @@ public class ParserTests
         var staticVar = Assert.IsType<KokosStaticVarDeclNode>(unit.Members[0]);
         Assert.Null(staticVar.Initializer);
     }
+
+    // --- ABI markers: import(c)/export(c) --------------------------------------------------------
+
+    [Fact]
+    public void A_bare_import_has_no_ABI_marker_and_is_not_the_C_ABI()
+    {
+        var unit = KokosParser.Parse("import function abs(n: Int): Int;", out var diagnostics);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+
+        var function = unit.Functions[0];
+        Assert.True(function.IsImported);
+        Assert.Null(function.AbiNameToken);
+        Assert.False(function.IsCAbi);
+    }
+
+    [Fact]
+    public void Import_c_parses_as_the_C_ABI()
+    {
+        var unit = KokosParser.Parse("import(c) function abs(n: Int): Int;", out var diagnostics);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+
+        var function = unit.Functions[0];
+        Assert.True(function.IsImported);
+        Assert.True(function.IsCAbi);
+    }
+
+    [Fact]
+    public void Export_c_parses_as_the_C_ABI()
+    {
+        var unit = KokosParser.Parse("export(c) function f(): Int { return 0; }", out var diagnostics);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+
+        var function = unit.Functions[0];
+        Assert.True(function.IsExported);
+        Assert.True(function.IsCAbi);
+    }
+
+    [Fact]
+    public void An_unknown_ABI_name_is_a_diagnostic()
+    {
+        var unit = KokosParser.Parse("import(rust) function abs(n: Int): Int;", out var diagnostics);
+        Assert.True(diagnostics.HasErrors);
+
+        // Still parses a usable tree despite the diagnostic — 'rust' isn't recognized as 'c', so this
+        // isn't treated as the C ABI either.
+        var function = unit.Functions[0];
+        Assert.False(function.IsCAbi);
+    }
+
+    [Fact]
+    public void A_plain_function_cannot_carry_an_ABI_marker()
+    {
+        // The '(...)' ABI marker is only recognized right after a leading 'import'/'export' keyword —
+        // a plain 'function' has none, so "(c)" here is just unexpected input where a function name
+        // was expected.
+        var unit = KokosParser.Parse("function(c) f(): Int { return 0; }", out var diagnostics);
+        Assert.True(diagnostics.HasErrors);
+        Assert.NotNull(unit);
+    }
 }

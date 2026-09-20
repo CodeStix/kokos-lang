@@ -33,6 +33,13 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     /// </summary>
     public const string StaticInitializerFunctionName = "kokos.init_statics";
 
+    /// <summary>
+    /// The name of the small, `noinline` wrapper every compiler-inserted release goes through instead
+    /// of calling `@free` directly — see <see cref="EmitRelease"/>'s doc comment for why this exists.
+    /// A `.` can never appear in a Kokos identifier, so this is guaranteed collision-free.
+    /// </summary>
+    private const string FreeWrapperFunctionName = "kokos.free";
+
     private readonly KokosDeclarationTable _table;
     private readonly KokosTypeChecker _checker;
     private readonly KokosLlvmTypeMapper _typeMapper;
@@ -67,6 +74,7 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     private readonly LLVMTypeRef _mallocFunctionType;
     private readonly LLVMValueRef _freeFunction;
     private readonly LLVMTypeRef _freeFunctionType;
+    private readonly LLVMValueRef _freeWrapperFunction;
     private readonly LLVMTypeRef _abortFunctionType;
 
     /// <summary>Deduplicates identical string-literal text onto one shared global envelope — see <see cref="GetOrCreateStringLiteralEnvelope"/>.</summary>
@@ -103,6 +111,14 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         _freeFunction = _module.AddFunction("free", _freeFunctionType);
         _abortFunctionType = LLVMTypeRef.CreateFunction(Context.VoidType, []);
         _abortFunction = _module.AddFunction("abort", _abortFunctionType);
+
+        // A tiny, `noinline` pass-through — see EmitRelease's doc comment for exactly why every
+        // compiler-inserted release calls this instead of '@free' directly.
+        _freeWrapperFunction = _module.AddFunction(FreeWrapperFunctionName, _freeFunctionType);
+        _freeWrapperFunction.AddAttributeAtIndex(LLVMAttributeIndex.LLVMAttributeFunctionIndex, Context.CreateEnumAttribute("noinline", 0));
+        PositionAtEnd(_freeWrapperFunction.AppendBasicBlock("entry"));
+        _builder.BuildCall2(_freeFunctionType, _freeFunction, new LLVMValueRef[] { _freeWrapperFunction.GetParam(0) }, "");
+        BuildRetVoid();
     }
 
     /// <summary>Generates every function in the file and returns the completed module.</summary>
@@ -1139,14 +1155,49 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     private LLVMValueRef EmitMallocBytes(LLVMValueRef byteCount, string name) =>
         _builder.BuildCall2(_mallocFunctionType, _mallocFunction, new LLVMValueRef[] { byteCount }, name);
 
-    /// <summary>Bumps an allocation's generation (invalidating every outstanding `unowned`/`manual` reference to it) and releases its memory via the manually-declared `free`. Shared by explicit `free()` (after a double-free check) and compiler-inserted release of an unconsumed `owned` binding at scope-end (no check needed there — the move checker already proved it can't be released twice).</summary>
-    private void EmitRelease(LLVMValueRef envelopePointer, LLVMTypeRef envelopeType)
+    /// <summary>
+    /// Bumps an allocation's generation (invalidating every outstanding `unowned`/`manual` reference
+    /// to it) and releases its memory. Shared by explicit `free()` (after a double-free check) and
+    /// compiler-inserted release of an unconsumed `owned` binding at scope-end (no check needed there
+    /// — the move checker already proved it can't be released twice).
+    ///
+    /// Deliberately calls the `kokos.free` wrapper, not `@free` directly: LLVM's optimizer recognizes
+    /// the literal name "free" (matching libc's, via TargetLibraryInfo) and knows it deallocates
+    /// memory — combined with the fact that C's memory model treats a missed deallocation as merely a
+    /// leak, never undefined behavior, this makes a direct `call void @free(...)` eligible for the
+    /// same "non-escaping heap allocation" elimination C code gets: once nothing after this point
+    /// reads the memory again, the optimizer can (and, confirmed by hand, does) delete the entire
+    /// allocation *and* this call outright — silently turning a value Kokos's ownership model
+    /// guarantees gets released into one that never does, the moment optimizations are turned on.
+    /// Routing through an ordinary, `noinline`, not-libc-recognized function breaks that recognition:
+    /// the optimizer can no longer prove the call is a "free" at all, so it can no longer prove the
+    /// allocation doesn't escape, and the release genuinely happens every time. `noinline` matters
+    /// too — without it, the wrapper's body (a bare call to the real `@free`) gets inlined back into
+    /// the caller and the exact same elimination re-applies to the now-visible raw call.
+    ///
+    /// A managed array is two independent allocations, not one — see <see cref="WrapDynamicArray"/>/
+    /// <see cref="WrapFixedArray"/>: the envelope only ever stores a *pointer* to a separately
+    /// `malloc`'d element buffer (so the envelope's own address can stay stable if the array is ever
+    /// grown/reallocated in place). Releasing the envelope alone would leak that buffer forever, so
+    /// <paramref name="kokosType"/> (the *structural* type — an already-unwrapped optional's inner
+    /// type, never the optional itself) is checked here to free the buffer too before touching the
+    /// envelope. A struct has no such indirection — its fields live inline in the same allocation as
+    /// its generation header — so nothing extra is needed there.
+    /// </summary>
+    private void EmitRelease(LLVMValueRef envelopePointer, LLVMTypeRef envelopeType, KokosType kokosType)
     {
+        if (kokosType is KokosArrayType arrayType)
+        {
+            var bodyPointer = GetBody(envelopePointer, envelopeType);
+            var bufferPointer = LoadElementPointerFromBody(bodyPointer, arrayType);
+            _builder.BuildCall2(_freeFunctionType, _freeWrapperFunction, new LLVMValueRef[] { bufferPointer }, "");
+        }
+
         var generationPointer = _builder.BuildStructGEP2(envelopeType, envelopePointer, 0, "genptr");
         var currentGeneration = _builder.BuildLoad2(Context.Int64Type, generationPointer, "gen");
         var bumped = _builder.BuildAdd(currentGeneration, LLVMValueRef.CreateConstInt(Context.Int64Type, 1, false), "gen.bump");
         _builder.BuildStore(bumped, generationPointer);
-        _builder.BuildCall2(_freeFunctionType, _freeFunction, new LLVMValueRef[] { envelopePointer }, "");
+        _builder.BuildCall2(_freeFunctionType, _freeWrapperFunction, new LLVMValueRef[] { envelopePointer }, "");
     }
 
     /// <summary>
@@ -1180,9 +1231,13 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     {
         var envelopeType = _typeMapper.MapEnvelope(kokosType);
 
+        // EmitRelease needs the *structural* type (to tell a struct from an array) — for a
+        // pointer-shaped optional that's its inner type, never the optional wrapper itself.
+        var structuralType = kokosType is KokosOptionalType optionalType ? optionalType.InnerType : kokosType;
+
         if (kokosType is not KokosOptionalType { ReusesInnerPointer: true })
         {
-            EmitRelease(envelopePointer, envelopeType);
+            EmitRelease(envelopePointer, envelopeType, structuralType);
             return;
         }
 
@@ -1192,7 +1247,7 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         BuildCondBr(isNull, continueBlock, releaseBlock);
 
         PositionAtEnd(releaseBlock);
-        EmitRelease(envelopePointer, envelopeType);
+        EmitRelease(envelopePointer, envelopeType, structuralType);
         BuildBr(continueBlock);
 
         PositionAtEnd(continueBlock);
@@ -1427,11 +1482,16 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     /// <summary>`free(m)` — a double-free is exactly a stale-reference use per spec, so it's checked (and traps on mismatch) the same way an ordinary dereference is, before bumping the generation and releasing the memory.</summary>
     public LLVMValueRef VisitFreeStatement(KokosFreeStatementNode node)
     {
-        var envelopeType = _typeMapper.MapEnvelope(_checker.ExpressionTypes[node.Operand]);
+        var kokosType = _checker.ExpressionTypes[node.Operand];
+        var envelopeType = _typeMapper.MapEnvelope(kokosType);
         var referencePair = node.Operand.Accept(this);
 
         var pointer = CheckGenerationOrTrap(referencePair, envelopeType, "free");
-        EmitRelease(pointer, envelopeType);
+
+        // EmitRelease needs the *structural* type (to tell a struct from an array) — for a
+        // pointer-shaped optional that's its inner type, never the optional wrapper itself.
+        var structuralType = kokosType is KokosOptionalType optionalType ? optionalType.InnerType : kokosType;
+        EmitRelease(pointer, envelopeType, structuralType);
 
         return default;
     }

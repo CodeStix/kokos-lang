@@ -1394,7 +1394,7 @@ public class TypeCheckerTests
         const string source = """
             struct Person { age: Int }
 
-            export function readAge(p: owned Person): Int { return p.age; }
+            export(c) function readAge(p: owned Person): Int { return p.age; }
             """;
 
         var (unit, _, checker, diagnostics) = Setup(source);
@@ -1409,7 +1409,7 @@ public class TypeCheckerTests
         const string source = """
             struct Person { age: Int }
 
-            export function readAge(p: unmanaged Person): Int { return p.age; }
+            export(c) function readAge(p: unmanaged Person): Int { return p.age; }
             """;
 
         var (unit, _, checker, diagnostics) = Setup(source);
@@ -1424,7 +1424,7 @@ public class TypeCheckerTests
         const string source = """
             struct Person { age: Int }
 
-            import function makePerson(): owned Person;
+            import(c) function makePerson(): owned Person;
             """;
 
         var (unit, _, checker, diagnostics) = Setup(source);
@@ -1867,11 +1867,54 @@ public class TypeCheckerTests
     {
         const string source = """
             opaque type CString = unmanaged [Int8];
-            import function puts(str: CString);
+            import(c) function puts(str: CString);
             """;
 
         var (unit, _, checker, diagnostics) = Setup(source);
         checker.VisitFunction((KokosFunctionNode)unit.Members[1]);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void A_bare_import_with_an_owned_parameter_is_not_a_diagnostic()
+    {
+        // No '(c)' marker — this is the Kokos ABI, meant to link only against another
+        // Kokos-compiled module, so an 'owned'/'unowned'/'manual' reference (or a by-value struct)
+        // may cross it freely; only a real C boundary ('(c)') restricts the signature shape.
+        const string source = """
+            struct Person { age: Int }
+
+            import function makePerson(): owned Person;
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[1]);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void A_bare_export_with_a_default_unowned_array_parameter_is_not_a_diagnostic()
+    {
+        // A default-ownership (unowned) array parameter, the exact shape a string literal itself
+        // resolves to ('readonly unowned [Int8]') — fails the C-ABI check, but with no '(c)' marker
+        // this is the Kokos ABI, where that's fine.
+        const string source = "export function concat(a: [Int8], b: [Int8]): Int { return a.length; }";
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[0]);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Export_c_with_a_default_unowned_array_parameter_is_a_diagnostic()
+    {
+        const string source = "export(c) function concat(a: [Int8], b: [Int8]): Int { return a.length; }";
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[0]);
 
         Assert.True(diagnostics.HasErrors);
     }

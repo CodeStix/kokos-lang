@@ -36,7 +36,8 @@ public sealed class KokosFormatter : IKokosVisitor<string>
 
     public string VisitFunction(KokosFunctionNode node)
     {
-        var leading = node.LeadingKeyword is null ? "" : $"{node.LeadingKeyword.Text} ";
+        var abi = node.AbiNameToken is null ? "" : $"({node.AbiNameToken.Text})";
+        var leading = node.LeadingKeyword is null ? "" : $"{node.LeadingKeyword.Text}{abi} ";
         var parameters = string.Join(", ", node.Parameters.Items.Select(p => p.Accept(this)));
         var returnType = node.ReturnType is null ? "" : $": {node.ReturnType.Accept(this)}";
         var bodyOrSemicolon = node.Body is null ? ";" : $" {node.Body.Accept(this)}";
