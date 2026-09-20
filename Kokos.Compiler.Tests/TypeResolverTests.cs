@@ -213,15 +213,15 @@ public class TypeResolverTests
     [Fact]
     public void Modifier_composes_with_an_array_optional_and_fixed_length_array_without_diagnostics()
     {
-        // Arrays only support the 'unmanaged' modifier (no generation-tracked representation exists
-        // for them yet) — 'unowned Person?' proves composition with a non-array optional still works.
+        // Dynamic/fixed-length arrays now support the full ownership spectrum, same as a reference
+        // struct — 'unowned Person?' proves composition with a non-array optional still works too.
         var (unit, _, resolver, diagnostics) = Setup(
             """
             struct Person { age: Int }
             struct Holder {
                 a: unmanaged [Person],
                 b: unowned Person?,
-                c: unmanaged length(100) [Int8]
+                c: owned [Int8 # 100]
             }
             """);
         resolver.ResolveStruct((KokosStructDeclNode)unit.Members[1]);
@@ -309,7 +309,7 @@ public class TypeResolverTests
     public void Classifies_all_three_array_flavors_as_pointer_shaped()
     {
         var (unit, _, resolver, diagnostics) = Setup(
-            "function f(a: [Int], b: length(4) [Int], c: terminated [Int8]): Object { return a; }");
+            "function f(a: [Int], b: [Int # 4], c: terminated [Int8]): Object { return a; }");
         var function = (KokosFunctionNode)unit.Members[0];
 
         var dynamic = resolver.Resolve(function.Parameters.Items[0].Type);

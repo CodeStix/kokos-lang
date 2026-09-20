@@ -1,39 +1,39 @@
 namespace Kokos.Compiler.Syntax.Nodes;
 
-/// <summary>A compile-time-sized array type: <c>length(N) [T]</c>. <see cref="SizeToken"/> is a raw integer marker.</summary>
+/// <summary>
+/// A compile-time-sized array type: <c>[T # N]</c>, or <c>value [T # N]</c> for one that compiles to
+/// an LLVM vector and is copied by value instead of heap-allocated (see <see cref="ValueKeyword"/>).
+/// <see cref="SizeToken"/> is a raw integer marker.
+/// </summary>
 public sealed class KokosFixedLengthArrayTypeNode : KokosTypeNode
 {
-    public KokosToken LengthKeyword { get; }
-    public KokosToken OpenParenToken { get; }
-    public KokosToken SizeToken { get; }
-    public KokosToken CloseParenToken { get; }
+    public KokosToken? ValueKeyword { get; }
     public KokosToken OpenBracketToken { get; }
     public KokosTypeNode ElementType { get; }
+    public KokosToken HashToken { get; }
+    public KokosToken SizeToken { get; }
     public KokosToken CloseBracketToken { get; }
 
     public KokosFixedLengthArrayTypeNode(
-        KokosToken lengthKeyword,
-        KokosToken openParenToken,
-        KokosToken sizeToken,
-        KokosToken closeParenToken,
+        KokosToken? valueKeyword,
         KokosToken openBracketToken,
         KokosTypeNode elementType,
+        KokosToken hashToken,
+        KokosToken sizeToken,
         KokosToken closeBracketToken)
     {
-        LengthKeyword = lengthKeyword;
-        OpenParenToken = openParenToken;
-        SizeToken = sizeToken;
-        CloseParenToken = closeParenToken;
+        ValueKeyword = valueKeyword;
         OpenBracketToken = openBracketToken;
         ElementType = elementType;
+        HashToken = hashToken;
+        SizeToken = sizeToken;
         CloseBracketToken = closeBracketToken;
 
-        AddChild(lengthKeyword);
-        AddChild(openParenToken);
-        AddChild(sizeToken);
-        AddChild(closeParenToken);
+        AddChild(valueKeyword);
         AddChild(openBracketToken);
         AddChild(elementType);
+        AddChild(hashToken);
+        AddChild(sizeToken);
         AddChild(closeBracketToken);
     }
 

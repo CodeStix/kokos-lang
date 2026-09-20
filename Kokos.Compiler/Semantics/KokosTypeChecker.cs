@@ -31,6 +31,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
     private readonly Dictionary<KokosFunctionNode, KokosFunctionType> _functionTypes = new();
     private readonly Dictionary<KokosExpressionNode, KokosType> _expressionTypes = new();
     private readonly Dictionary<KokosVarDeclNode, KokosOwnershipKind> _localOwnership = new();
+    private readonly Dictionary<KokosVarDeclNode, KokosType> _localTypes = new();
     private readonly Dictionary<KokosNode, IReadOnlyList<string>> _releasePoints = new();
     private readonly HashSet<KokosFunctionNode> _inProgress = new();
 
@@ -42,6 +43,15 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
 
     /// <summary>Every `let` local's resolved ownership, keyed by declaration — consumed by codegen to pick the right LLVM representation (bare pointer vs. reference pair).</summary>
     public IReadOnlyDictionary<KokosVarDeclNode, KokosOwnershipKind> LocalOwnership => _localOwnership;
+
+    /// <summary>
+    /// Every `let` local's resolved *declared* type, keyed by declaration — this is deliberately not
+    /// the same as <c>ExpressionTypes[node.Initializer]</c>: for most conversions (struct ownership)
+    /// the two happen to be the same underlying type, but an implicit fixed-length-to-dynamic array
+    /// conversion changes the structural type itself, so codegen needs the *target* shape here, not
+    /// the initializer's own.
+    /// </summary>
+    public IReadOnlyDictionary<KokosVarDeclNode, KokosType> LocalTypes => _localTypes;
 
     /// <summary>
     /// The compiler-inserted-release half of the move checker: at a <see cref="KokosReturnNode"/>, or
@@ -149,6 +159,18 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         if (ReferenceEquals(from, to)) return true;
         if (to is KokosOptionalType optionalTo) return IsAssignable(from, optionalTo.InnerType);
         if (to is KokosUnionType unionTo) return unionTo.Members.Any(member => IsAssignable(from, member));
+
+        // A fixed-length array converts implicitly to a dynamic array of the same element type (the
+        // compile-time length gets baked into the dynamic array's runtime length field at the
+        // conversion site — see KokosCodeGenerator.ConvertOwnership). Never the other way around: a
+        // dynamic array's length isn't known at compile time.
+        if (from is KokosArrayType { Kind: KokosArrayKind.FixedLength, IsValueType: false } fixedFrom
+            && to is KokosArrayType { Kind: KokosArrayKind.Dynamic } dynamicTo
+            && ReferenceEquals(fixedFrom.ElementType, dynamicTo.ElementType))
+        {
+            return true;
+        }
+
         return false;
     }
 
@@ -226,22 +248,21 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             parameterOwnership.Add(ownership);
             _scope[parameter.Name] = new KokosBinding(paramType, ownership);
 
-            // VisitModifiedType already rejects the wrong *explicit* modifier on an array; this catches
-            // the remaining case — no modifier at all, silently defaulting to `Unowned`.
-            if (paramType is KokosArrayType && ownership != KokosOwnershipKind.Unmanaged)
+            // A terminated array exists purely for C-string interop and stays 'unmanaged'-only.
+            if (paramType is KokosArrayType { Kind: KokosArrayKind.Terminated } && ownership != KokosOwnershipKind.Unmanaged)
             {
                 _diagnostics.ReportError(parameter.Type.GetTokens().First().Span,
-                    "Arrays are only supported as 'unmanaged' in this phase; annotate this parameter with 'unmanaged'.");
+                    "A 'terminated' array is only supported as 'unmanaged'; annotate this parameter with 'unmanaged'.");
             }
         }
 
         _currentDeclaredReturnType = node.ReturnType is null ? null : _resolver.Resolve(node.ReturnType);
         _currentDeclaredReturnOwnership = node.ReturnType is null ? null : KokosModifierMapper.OwnershipOf(node.ReturnType);
 
-        if (_currentDeclaredReturnType is KokosArrayType && _currentDeclaredReturnOwnership != KokosOwnershipKind.Unmanaged)
+        if (_currentDeclaredReturnType is KokosArrayType { Kind: KokosArrayKind.Terminated } && _currentDeclaredReturnOwnership != KokosOwnershipKind.Unmanaged)
         {
             _diagnostics.ReportError(node.NameToken.Span,
-                "Arrays are only supported as 'unmanaged' in this phase; annotate the return type with 'unmanaged'.");
+                "A 'terminated' array is only supported as 'unmanaged'; annotate the return type with 'unmanaged'.");
         }
 
         try
@@ -460,10 +481,10 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
 
         if (node.Type is not null)
         {
-            if (variableType is KokosArrayType && ownership != KokosOwnershipKind.Unmanaged)
+            if (variableType is KokosArrayType { Kind: KokosArrayKind.Terminated } && ownership != KokosOwnershipKind.Unmanaged)
             {
                 _diagnostics.ReportError(node.NameToken.Span,
-                    "Arrays are only supported as 'unmanaged' in this phase; annotate '" + node.Name + "' with 'unmanaged'.");
+                    "A 'terminated' array is only supported as 'unmanaged'; annotate '" + node.Name + "' with 'unmanaged'.");
             }
 
             if (ownership is KokosOwnershipKind.Owned or KokosOwnershipKind.Unowned or KokosOwnershipKind.Manual
@@ -476,6 +497,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
 
         _scope[node.Name] = new KokosBinding(variableType, ownership);
         _localOwnership[node] = ownership;
+        _localTypes[node] = variableType;
 
         if (ownership == KokosOwnershipKind.Owned)
             MarkTransferred(node.Initializer);
@@ -837,6 +859,62 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         return KokosUnknownType.Instance;
     }
 
+    /// <summary>
+    /// <c>[value # length]</c>. Dynamic vs. fixed-length is a semantic decision, not a syntactic one:
+    /// an integer-*literal* length (<c>["" # 10]</c>) makes this fixed-length (the compiler bakes the
+    /// constant in and never stores a runtime length field); anything else (<c>[0 # count]</c>) makes
+    /// it dynamic. This phase never infers a `value` (vector) result from construction syntax alone.
+    /// </summary>
+    public KokosType VisitArrayConstruction(KokosArrayConstructionNode node)
+    {
+        var elementType = TypeOf(node.Value);
+        var lengthType = TypeOf(node.Length);
+
+        if (lengthType is not (KokosUnknownType or KokosErrorType) && lengthType is not KokosPrimitiveType { IsFloatingPoint: false })
+        {
+            _diagnostics.ReportError(SpanOf(node.Length), $"An array's length must be an integer, but got '{lengthType.DisplayName}'.");
+        }
+
+        if (elementType is KokosErrorType)
+            return KokosErrorType.Instance;
+
+        // A `value [T # N]` result is never inferred from the construction syntax alone — only from
+        // context, the same way a bare numeric literal adapts to `_expectedType` above. Matches
+        // exactly when the expected type is a value array of the same length (the element type still
+        // has to satisfy the ordinary assignability check the caller runs against this result).
+        var expectedUnwrapped = _expectedType is KokosAliasType aliasExpected ? aliasExpected.UnderlyingType : _expectedType;
+        var isValueType = expectedUnwrapped is KokosArrayType { IsValueType: true, Kind: KokosArrayKind.FixedLength } expectedValueArray
+            && node.Length is KokosLiteralNumberNode { Value: long expectedLength } && expectedLength == expectedValueArray.Length;
+
+        var arrayType = node.Length is KokosLiteralNumberNode { Value: long literalLength }
+            ? new KokosArrayType(KokosArrayKind.FixedLength, elementType, literalLength, isValueType)
+            : new KokosArrayType(KokosArrayKind.Dynamic, elementType);
+
+        return _resolver.Intern(arrayType);
+    }
+
+    public KokosType VisitIndex(KokosIndexNode node)
+    {
+        var targetType = TypeOf(node.Target);
+        var indexType = TypeOf(node.Index);
+
+        if (indexType is not (KokosUnknownType or KokosErrorType) && indexType is not KokosPrimitiveType { IsFloatingPoint: false })
+        {
+            _diagnostics.ReportError(SpanOf(node.Index), $"An array index must be an integer, but got '{indexType.DisplayName}'.");
+        }
+
+        if (targetType is KokosUnknownType or KokosErrorType)
+            return KokosUnknownType.Instance;
+
+        if (targetType is not KokosArrayType arrayType)
+        {
+            _diagnostics.ReportError(SpanOf(node.Target), $"Cannot index into a value of type '{targetType.DisplayName}'.");
+            return KokosErrorType.Instance;
+        }
+
+        return arrayType.ElementType;
+    }
+
     /// <summary>The by-name-or-ordinal field lookup shared by every place that resolves a struct member access.</summary>
     private static KokosStructField? FindField(KokosStructType structType, KokosToken nameToken, string memberName) =>
         nameToken.Kind == TokenKind.NumberLiteral
@@ -883,6 +961,16 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         if (expression is KokosCallNode { Callee: KokosIdentifierNode fnName } && _table.TryGetFunction(fnName.Name, out var fnDecl))
         {
             ownership = GetFunctionType(fnDecl).ReturnOwnership;
+            return true;
+        }
+
+        // An array construction (`[value # length]`) always produces a fresh, uniquely-owned
+        // allocation — this phase never infers a `value` (vector) result from construction syntax
+        // alone (there's no example of that in the spec), so there's no value-shaped case to skip here
+        // the way the struct-construction case above has to.
+        if (expression is KokosArrayConstructionNode)
+        {
+            ownership = KokosOwnershipKind.Owned;
             return true;
         }
 
@@ -1011,6 +1099,23 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
 
             _diagnostics.ReportError(node.NameToken.Span, $"'{structType.DisplayName}' has no field '{node.MemberName}'.");
             return KokosErrorType.Instance;
+        }
+
+        if (targetType is KokosArrayType arrayType && node.MemberName == "length")
+        {
+            if (arrayType.Kind == KokosArrayKind.Terminated)
+            {
+                _diagnostics.ReportError(node.NameToken.Span, "A 'terminated' array has no 'length' field.");
+                return KokosErrorType.Instance;
+            }
+
+            if (TryGetOwnership(node.Target, out var arrayOwnership) && arrayOwnership == KokosOwnershipKind.Unmanaged)
+            {
+                _diagnostics.ReportError(node.NameToken.Span, "An 'unmanaged' array has no 'length' field.");
+                return KokosErrorType.Instance;
+            }
+
+            return KokosPrimitiveType.Int;
         }
 
         // No method-declaration syntax exists yet, so a member access/call on anything else (e.g.

@@ -1270,12 +1270,13 @@ public class TypeCheckerTests
     }
 
     [Fact]
-    public void Array_parameter_without_an_explicit_unmanaged_modifier_is_a_diagnostic()
+    public void Array_parameter_without_an_explicit_modifier_defaults_to_unowned_and_is_not_a_diagnostic()
     {
         var (unit, _, checker, diagnostics) = Setup("function f(bytes: [UInt8]): Int { return 0; }");
-        CheckFunction(checker, unit);
+        var functionType = CheckFunction(checker, unit);
 
-        Assert.True(diagnostics.HasErrors);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+        Assert.Equal(KokosOwnershipKind.Unowned, functionType.ParameterOwnership[0]);
     }
 
     [Fact]
@@ -1285,6 +1286,15 @@ public class TypeCheckerTests
         CheckFunction(checker, unit);
 
         Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Terminated_array_parameter_without_an_explicit_unmanaged_modifier_is_a_diagnostic()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f(bytes: terminated [UInt8]): Int { return 0; }");
+        CheckFunction(checker, unit);
+
+        Assert.True(diagnostics.HasErrors);
     }
 
     [Fact]
@@ -1317,6 +1327,96 @@ public class TypeCheckerTests
 
         var (unit, _, checker, diagnostics) = Setup(source);
         checker.VisitFunction((KokosFunctionNode)unit.Members[2]);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    // --- Real arrays -------------------------------------------------------------------------------
+
+    [Fact]
+    public void Array_construction_with_a_literal_length_infers_a_fixed_length_array()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f(): Int { let arr = [0 # 10]; return arr.length; }");
+        var functionType = CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+        Assert.Same(KokosPrimitiveType.Int, functionType.ReturnType);
+    }
+
+    [Fact]
+    public void Array_construction_with_a_variable_length_infers_a_dynamic_array()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f(count: Int): Int { let arr = [0 # count]; return arr.length; }");
+        CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Length_on_an_unmanaged_array_is_a_diagnostic()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f(arr: unmanaged [Int]): Int { return arr.length; }");
+        CheckFunction(checker, unit);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Length_on_a_terminated_array_is_a_diagnostic()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f(arr: unmanaged terminated [Int8]): Int { return arr.length; }");
+        CheckFunction(checker, unit);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Indexing_an_array_types_as_the_element_type()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f(arr: [Int]): Int { return arr[0]; }");
+        CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Indexing_a_non_array_is_a_diagnostic()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f(x: Int): Int { return x[0]; }");
+        CheckFunction(checker, unit);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Fixed_length_array_is_assignable_to_a_dynamic_array_of_the_same_element_type()
+    {
+        var (unit, _, checker, diagnostics) = Setup(
+            "function f(): Int { let fixedArr = [0 # 10]; let arr: [Int] = fixedArr; return arr.length; }");
+        CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Value_array_with_a_non_primitive_element_type_is_a_diagnostic()
+    {
+        const string source = """
+            struct Person { age: Int }
+            function f(v: value [Person # 3]): Int { return 0; }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[1]);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void Value_array_with_an_explicit_ownership_modifier_is_a_diagnostic()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f(v: owned value [Int # 3]): Int { return 0; }");
+        CheckFunction(checker, unit);
 
         Assert.True(diagnostics.HasErrors);
     }

@@ -18,7 +18,6 @@ public enum TokenKind
     EnumKeyword,
     StructKeyword,
     ValueKeyword,
-    LengthKeyword,
     TerminatedKeyword,
     IfKeyword,
     ElseKeyword,
@@ -48,6 +47,7 @@ public enum TokenKind
     Dot,
     Question,
     Pipe,
+    Hash,
 
     // Operators
     Equals,

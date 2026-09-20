@@ -80,10 +80,11 @@ public sealed class KokosFormatter : IKokosVisitor<string>
 
     public string VisitNamedType(KokosNamedTypeNode node) => node.Name;
 
-    public string VisitArrayType(KokosArrayTypeNode node) => $"[{node.ElementType.Accept(this)}]";
+    public string VisitArrayType(KokosArrayTypeNode node) =>
+        $"{(node.ValueKeyword is null ? "" : "value ")}[{node.ElementType.Accept(this)}]";
 
     public string VisitFixedLengthArrayType(KokosFixedLengthArrayTypeNode node) =>
-        $"length({node.SizeToken.Text}) [{node.ElementType.Accept(this)}]";
+        $"{(node.ValueKeyword is null ? "" : "value ")}[{node.ElementType.Accept(this)} # {node.SizeToken.Text}]";
 
     public string VisitTerminatedArrayType(KokosTerminatedArrayTypeNode node) =>
         $"terminated [{node.ElementType.Accept(this)}]";
@@ -201,4 +202,9 @@ public sealed class KokosFormatter : IKokosVisitor<string>
 
     public string VisitDestroyedExpression(KokosDestroyedExpressionNode node) =>
         $"destroyed({node.Operand.Accept(this)})";
+
+    public string VisitArrayConstruction(KokosArrayConstructionNode node) =>
+        $"[{node.Value.Accept(this)} # {node.Length.Accept(this)}]";
+
+    public string VisitIndex(KokosIndexNode node) => $"{node.Target.Accept(this)}[{node.Index.Accept(this)}]";
 }

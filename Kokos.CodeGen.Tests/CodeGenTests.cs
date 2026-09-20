@@ -575,4 +575,104 @@ public class CodeGenTests
 
         Assert.Equal(99, makeAndRead());
     }
+
+    // --- Real arrays -------------------------------------------------------------------------------
+
+    [Fact]
+    public void Dynamic_array_constructed_with_a_runtime_length_reports_the_correct_length_and_contents()
+    {
+        using var jit = GenerateAndJit(
+            """
+            export function f(count: Int): Int {
+                let arr = [7 # count];
+                return arr.length + arr[0] + arr[count - 1];
+            }
+            """);
+
+        var f = jit.GetFunction<UnaryLongFunc>("f");
+
+        // length=5, arr[0]=7, arr[4]=7 -> 5 + 7 + 7
+        Assert.Equal(19, f(5));
+    }
+
+    [Fact]
+    public void Fixed_length_array_constructs_and_supports_index_read_and_write()
+    {
+        using var jit = GenerateAndJit(
+            """
+            export function f(): Int {
+                let arr = [0 # 10];
+                arr[3] = 42;
+                return arr[3] + arr[0];
+            }
+            """);
+
+        var f = jit.GetFunction<NullaryLongFunc>("f");
+
+        Assert.Equal(42, f());
+    }
+
+    [Fact]
+    public void Fixed_length_array_implicitly_converts_to_a_dynamic_array_preserving_contents_and_length()
+    {
+        using var jit = GenerateAndJit(
+            """
+            export function f(): Int {
+                let fixedArr = [9 # 4];
+                let arr: [Int] = fixedArr;
+                return arr.length + arr[0] + arr[3];
+            }
+            """);
+
+        var f = jit.GetFunction<NullaryLongFunc>("f");
+
+        // length=4, arr[0]=9, arr[3]=9 -> 4 + 9 + 9
+        Assert.Equal(22, f());
+    }
+
+    [Fact]
+    public void Manual_array_freed_then_destroyed_via_a_second_unowned_reference_is_true()
+    {
+        using var jit = GenerateAndJit(
+            """
+            export function f(): Int {
+                let m: manual [Int] = [1 # 5];
+                let watch: unowned [Int] = m;
+                free(m);
+                if destroyed(watch) {
+                    return 1;
+                }
+                return 0;
+            }
+            """);
+
+        var f = jit.GetFunction<NullaryLongFunc>("f");
+
+        Assert.Equal(1, f());
+    }
+
+    [Fact]
+    public void Value_array_constructs_indexes_and_passes_by_value()
+    {
+        using var jit = GenerateAndJit(
+            """
+            type Vector3 = value [Int # 3];
+
+            function scaleFirst(v: Vector3): Int {
+                v[0] = 999;
+                return v[0];
+            }
+
+            export function f(): Int {
+                let v: Vector3 = [2 # 3];
+                scaleFirst(v);
+                // The callee's mutation of its own copy must not leak back into the caller's original.
+                return v[0] + v[1] + v[2];
+            }
+            """);
+
+        var f = jit.GetFunction<NullaryLongFunc>("f");
+
+        Assert.Equal(6, f());
+    }
 }

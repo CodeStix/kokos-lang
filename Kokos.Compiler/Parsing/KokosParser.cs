@@ -254,25 +254,11 @@ public sealed class KokosParser
     {
         switch (Current.Kind)
         {
-            case TokenKind.OpenBracket:
-            {
-                var open = Advance();
-                var elementType = ParseType();
-                var close = Expect(TokenKind.CloseBracket, "']'");
-                return new KokosArrayTypeNode(open, elementType, close);
-            }
+            case TokenKind.ValueKeyword when Peek(1).Kind == TokenKind.OpenBracket:
+                return ParseArrayLikeType(Advance());
 
-            case TokenKind.LengthKeyword:
-            {
-                var lengthKeyword = Advance();
-                var openParen = Expect(TokenKind.OpenParen, "'('");
-                var size = Expect(TokenKind.NumberLiteral, "an array length");
-                var closeParen = Expect(TokenKind.CloseParen, "')'");
-                var openBracket = Expect(TokenKind.OpenBracket, "'['");
-                var elementType = ParseType();
-                var closeBracket = Expect(TokenKind.CloseBracket, "']'");
-                return new KokosFixedLengthArrayTypeNode(lengthKeyword, openParen, size, closeParen, openBracket, elementType, closeBracket);
-            }
+            case TokenKind.OpenBracket:
+                return ParseArrayLikeType(null);
 
             case TokenKind.TerminatedKeyword:
             {
@@ -293,6 +279,30 @@ public sealed class KokosParser
                 return new KokosNamedTypeNode(name);
             }
         }
+    }
+
+    /// <summary>
+    /// Parses <c>[T]</c> (dynamic) or <c>[T # N]</c> (fixed-length), with an optional leading <c>value</c>
+    /// already consumed by the caller — <c>value</c> only makes semantic sense on the fixed-length
+    /// form (an LLVM vector needs a compile-time-known element count), but that's a resolver concern,
+    /// not a parser one; <see cref="KokosArrayTypeNode"/> still carries the token so a `value [T]`
+    /// mistake gets a real diagnostic instead of being silently dropped.
+    /// </summary>
+    private KokosTypeNode ParseArrayLikeType(KokosToken? valueKeyword)
+    {
+        var openBracket = Expect(TokenKind.OpenBracket, "'['");
+        var elementType = ParseType();
+
+        if (Current.Kind == TokenKind.Hash)
+        {
+            var hash = Advance();
+            var size = Expect(TokenKind.NumberLiteral, "an array length");
+            var closeBracket = Expect(TokenKind.CloseBracket, "']'");
+            return new KokosFixedLengthArrayTypeNode(valueKeyword, openBracket, elementType, hash, size, closeBracket);
+        }
+
+        var close = Expect(TokenKind.CloseBracket, "']'");
+        return new KokosArrayTypeNode(valueKeyword, openBracket, elementType, close);
     }
 
     private KokosTupleTypeNode ParseTupleType()
@@ -416,7 +426,7 @@ public sealed class KokosParser
     {
         var left = ParseConditional();
 
-        if (Current.Kind == TokenKind.Equals && left is KokosIdentifierNode or KokosMemberAccessNode)
+        if (Current.Kind == TokenKind.Equals && left is KokosIdentifierNode or KokosMemberAccessNode or KokosIndexNode)
         {
             var equals = Advance();
             var value = ParseAssignment();
@@ -505,6 +515,13 @@ public sealed class KokosParser
                 var closeParen = Expect(TokenKind.CloseParen, "')'");
                 expression = new KokosCallNode(expression, openParen, arguments, closeParen);
             }
+            else if (Current.Kind == TokenKind.OpenBracket)
+            {
+                var openBracket = Advance();
+                var index = ParseExpression();
+                var closeBracket = Expect(TokenKind.CloseBracket, "']'");
+                expression = new KokosIndexNode(expression, openBracket, index, closeBracket);
+            }
             else
             {
                 break;
@@ -558,6 +575,16 @@ public sealed class KokosParser
                 var operand = ParseExpression();
                 var closeParen = Expect(TokenKind.CloseParen, "')'");
                 return new KokosDestroyedExpressionNode(destroyedKeyword, openParen, operand, closeParen);
+            }
+
+            case TokenKind.OpenBracket:
+            {
+                var openBracket = Advance();
+                var value = ParseExpression();
+                var hash = Expect(TokenKind.Hash, "'#'");
+                var length = ParseExpression();
+                var closeBracket = Expect(TokenKind.CloseBracket, "']'");
+                return new KokosArrayConstructionNode(openBracket, value, hash, length, closeBracket);
             }
 
             default:

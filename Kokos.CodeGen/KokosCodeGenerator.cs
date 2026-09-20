@@ -264,10 +264,10 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     public LLVMValueRef VisitVarDecl(KokosVarDeclNode node)
     {
         var value = node.Initializer.Accept(this);
-        var kokosType = _checker.ExpressionTypes[node.Initializer];
+        var kokosType = _checker.LocalTypes[node];
         var ownership = _checker.LocalOwnership[node];
 
-        var converted = ConvertOwnership(value, GetOwnership(node.Initializer), ownership, kokosType);
+        var converted = ConvertOwnership(value, GetOwnership(node.Initializer), ownership, _checker.ExpressionTypes[node.Initializer], kokosType);
         var llvmType = _typeMapper.Map(kokosType, ownership);
 
         var alloca = _builder.BuildAlloca(llvmType, node.Name);
@@ -288,7 +288,7 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         // about to release (e.g. `return other.field;` while `other` gets released here too) — then
         // release whatever's left over, then actually return.
         var value = node.Expression.Accept(this);
-        var converted = ConvertOwnership(value, GetOwnership(node.Expression), _currentFunctionType.ReturnOwnership, _currentFunctionType.ReturnType);
+        var converted = ConvertOwnership(value, GetOwnership(node.Expression), _currentFunctionType.ReturnOwnership, _checker.ExpressionTypes[node.Expression], _currentFunctionType.ReturnType);
         EmitReleasesFor(node);
         return BuildRet(converted);
     }
@@ -468,11 +468,12 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     {
         var value = node.Value.Accept(this);
         var sourceOwnership = GetOwnership(node.Value);
+        var sourceType = _checker.ExpressionTypes[node.Value];
 
         if (node.Target is KokosIdentifierNode identifier)
         {
             var (pointer, _, targetOwnership, kokosType) = _scope[identifier.Name];
-            var converted = ConvertOwnership(value, sourceOwnership, targetOwnership, kokosType);
+            var converted = ConvertOwnership(value, sourceOwnership, targetOwnership, sourceType, kokosType);
             _builder.BuildStore(converted, pointer);
             return converted;
         }
@@ -495,7 +496,7 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
                 var (basePointer, baseLlvmType, _, _) = _scope[baseIdentifier.Name];
                 var current = _builder.BuildLoad2(baseLlvmType, basePointer, "struct.load");
                 var field = FindField(valueStructType, access);
-                var converted = ConvertOwnership(value, sourceOwnership, field.Ownership, field.Type);
+                var converted = ConvertOwnership(value, sourceOwnership, field.Ownership, sourceType, field.Type);
                 var updated = _builder.BuildInsertValue(current, converted, (uint)field.OrdinalPosition, "struct.update");
                 _builder.BuildStore(updated, basePointer);
                 return converted;
@@ -507,11 +508,39 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
                 var baseValue = access.Target.Accept(this);
                 var bodyPointer = ResolveBodyPointer(baseValue, baseOwnership, referenceStructType);
                 var field = FindField(referenceStructType, access);
-                var converted = ConvertOwnership(value, sourceOwnership, field.Ownership, field.Type);
+                var converted = ConvertOwnership(value, sourceOwnership, field.Ownership, sourceType, field.Type);
                 var fieldPointer = _builder.BuildStructGEP2(_typeMapper.MapStructBody(referenceStructType), bodyPointer, (uint)field.OrdinalPosition, "fieldptr");
                 _builder.BuildStore(converted, fieldPointer);
                 return converted;
             }
+        }
+
+        if (node.Target is KokosIndexNode indexNode)
+        {
+            var arrayType = (KokosArrayType)_checker.ExpressionTypes[indexNode.Target];
+            var indexValue = ExtendToInt64(indexNode.Index.Accept(this));
+
+            if (arrayType.IsValueType)
+            {
+                if (indexNode.Target is not KokosIdentifierNode baseIdentifier)
+                {
+                    throw new NotSupportedException(
+                        "Assigning into a 'value' array's element is only supported when the array is a plain local.");
+                }
+
+                CheckIndexInBoundsOrTrap(indexValue, LLVMValueRef.CreateConstInt(Context.Int64Type, unchecked((ulong)arrayType.Length!.Value), false));
+                var (basePointer, baseLlvmType, _, _) = _scope[baseIdentifier.Name];
+                var current = _builder.BuildLoad2(baseLlvmType, basePointer, "vec.load");
+                var updated = _builder.BuildInsertElement(current, value, indexValue, "vec.update");
+                _builder.BuildStore(updated, basePointer);
+                return value;
+            }
+
+            var arrayOwnership = GetOwnership(indexNode.Target);
+            var arrayValue = indexNode.Target.Accept(this);
+            var elementPointer = ComputeIndexedElementPointer(arrayValue, arrayOwnership, arrayType, indexValue);
+            _builder.BuildStore(value, elementPointer);
+            return value;
         }
 
         throw new NotSupportedException($"Unsupported assignment target shape: {node.Target.GetType().Name}.");
@@ -546,54 +575,86 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         KokosCallNode { Callee: KokosIdentifierNode name } call when _table.TryGetStruct(name.Name, out _)
             && _checker.ExpressionTypes[call] is KokosStructType { IsValueType: false } => KokosOwnershipKind.Owned,
         KokosCallNode { Callee: KokosIdentifierNode name } when _table.TryGetFunction(name.Name, out var decl) => _checker.FunctionTypes[decl].ReturnOwnership,
+        // An array construction (`[value # length]`) always produces a fresh, uniquely-owned
+        // allocation — mirrors the struct-construction case above (this phase never infers a `value`
+        // vector result from construction syntax alone).
+        KokosArrayConstructionNode => KokosOwnershipKind.Owned,
         _ => KokosOwnershipKind.Owned,
     };
 
     /// <summary>
-    /// Converts a value from its source ownership's LLVM shape to a target position's expected shape.
-    /// Two real cases: `owned` (bare envelope pointer) -> `unowned`/`manual` (reference pair) is a
+    /// Converts a value from its source shape/ownership to a target position's expected shape/
+    /// ownership. Three real cases, checked in order: a fixed-length array converting to a dynamic
+    /// array (a structural, kind-level conversion — see <see cref="ConvertFixedToDynamicArray"/>, the
+    /// only case that needs both the source *and* target <see cref="KokosType"/>, since the shape
+    /// genuinely changes); `owned` (bare envelope pointer) -> `unowned`/`manual` (reference pair) is a
     /// reborrow, reading the *allocation's current* generation and packaging it with the pointer;
-    /// `owned`/`unowned`/`manual` -> `unmanaged` strips the generation entirely, landing on a bare
-    /// pointer at the struct's body (see <see cref="StripGeneration"/>) — the C-interop conversion.
-    /// Every other pairing (including `unmanaged` -> `unmanaged`, and same-kind -> same-kind) passes
-    /// the value through completely unchanged — re-capturing a "fresh" generation on an already-
-    /// non-owned pass would silently defeat exactly the staleness detection a longer-lived reference
-    /// exists to catch. `unmanaged` -> a tracked kind never reaches here: the checker statically
-    /// rejects it, since Kokos can never re-establish a generation for a foreign pointer.
-    /// <paramref name="type"/> only needs to be a real <see cref="KokosStructType"/> when a reborrow or
-    /// a strip actually happens — for a reborrow that's guaranteed by <paramref name="to"/> being
-    /// `Unowned`/`Manual` (per the placement-validation rules from Phase D, only ever a pointer-shaped
-    /// type); for a strip, an array position is always already `unmanaged` on both sides (never taking
-    /// this branch at all), so `from != Unmanaged` here can only mean a struct.
+    /// `owned`/`unowned`/`manual` -> `unmanaged` strips the generation entirely (see
+    /// <see cref="StripGeneration"/>) — the C-interop conversion. Every other pairing (including
+    /// `unmanaged` -> `unmanaged`, and same-kind -> same-kind) passes the value through completely
+    /// unchanged — re-capturing a "fresh" generation on an already-non-owned pass would silently
+    /// defeat exactly the staleness detection a longer-lived reference exists to catch. `unmanaged` ->
+    /// a tracked kind never reaches here: the checker statically rejects it.
     /// </summary>
-    private LLVMValueRef ConvertOwnership(LLVMValueRef value, KokosOwnershipKind from, KokosOwnershipKind to, KokosType type)
+    private LLVMValueRef ConvertOwnership(LLVMValueRef value, KokosOwnershipKind from, KokosOwnershipKind to, KokosType fromType, KokosType toType)
     {
+        if (fromType is KokosArrayType { Kind: KokosArrayKind.FixedLength, IsValueType: false } fixedType
+            && toType is KokosArrayType { Kind: KokosArrayKind.Dynamic } dynamicType)
+        {
+            return ConvertFixedToDynamicArray(value, from, fixedType, to, dynamicType);
+        }
+
         if (to == KokosOwnershipKind.Unmanaged && from != KokosOwnershipKind.Unmanaged)
-            return StripGeneration(value, from, (KokosStructType)type);
+            return StripGeneration(value, from, toType);
 
         if (from != KokosOwnershipKind.Owned || to is not (KokosOwnershipKind.Unowned or KokosOwnershipKind.Manual))
             return value;
 
-        var structType = (KokosStructType)type;
-        var envelopeType = _typeMapper.MapEnvelope(structType);
+        var envelopeType = _typeMapper.MapEnvelope(toType);
         var generation = LoadCurrentGeneration(value, envelopeType);
-        var pairType = _typeMapper.Map(structType, to);
+        var pairType = _typeMapper.Map(toType, to);
         var pair = _builder.BuildInsertValue(pairType.Undef, value, 0, "reborrow");
         return _builder.BuildInsertValue(pair, generation, 1, "reborrow");
     }
 
     /// <summary>
     /// The C-interop conversion: given an `owned` (bare envelope pointer) or `unowned`/`manual`
-    /// (reference pair) value, produces a bare pointer straight at the struct's body — the same bytes
-    /// a C struct of the same fields would occupy, with the generation prefix (and, for a pair, the
+    /// (reference pair) value, produces a bare pointer straight at the element data — the same bytes a
+    /// C pointer of the same shape would occupy, with the generation prefix (and, for a pair, the
     /// captured generation alongside it) simply dropped on the floor. There is deliberately no
-    /// generation check here: `unmanaged` is the explicit "trust me, this is safe" escape hatch.
+    /// generation check here: `unmanaged` is the explicit "trust me, this is safe" escape hatch. For a
+    /// struct, the body pointer itself already *is* the unmanaged shape; for an array, one more level
+    /// of indirection is needed (see <see cref="LoadElementPointerFromBody"/>) — an array's body is a
+    /// pointer *value* (or a `{length, ptr}` struct), not something further-GEP'd into like a struct's.
     /// </summary>
-    private LLVMValueRef StripGeneration(LLVMValueRef value, KokosOwnershipKind from, KokosStructType structType)
+    private LLVMValueRef StripGeneration(LLVMValueRef value, KokosOwnershipKind from, KokosType type)
     {
-        var envelopeType = _typeMapper.MapEnvelope(structType);
+        var envelopeType = _typeMapper.MapEnvelope(type);
         var envelopePointer = from == KokosOwnershipKind.Owned ? value : ExtractPointer(value);
-        return GetBody(envelopePointer, envelopeType);
+        var bodyPointer = GetBody(envelopePointer, envelopeType);
+
+        return type is KokosArrayType arrayType ? LoadElementPointerFromBody(bodyPointer, arrayType) : bodyPointer;
+    }
+
+    /// <summary>
+    /// The spec's implicit fixed-length -> dynamic array conversion. A fixed array's envelope has no
+    /// room for a length field (its body is just a bare element pointer), so there's no way to convert
+    /// one in place — this allocates a *fresh* managed envelope around a freshly built
+    /// <c>{ length, ptr }</c> body, reusing the source's already-allocated element buffer (the pointer
+    /// is copied, not the data). The source array itself is left untouched. When the target ownership
+    /// is `unmanaged`, no envelope is needed at all — an unmanaged dynamic array has no length field
+    /// either, so both sides are already the same bare-element-pointer shape.
+    /// </summary>
+    private LLVMValueRef ConvertFixedToDynamicArray(LLVMValueRef value, KokosOwnershipKind from, KokosArrayType fixedType, KokosOwnershipKind to, KokosArrayType dynamicType)
+    {
+        var elementPointer = ResolveArrayElementPointer(value, from, fixedType);
+
+        if (to == KokosOwnershipKind.Unmanaged)
+            return elementPointer;
+
+        var lengthConst = LLVMValueRef.CreateConstInt(Context.Int64Type, unchecked((ulong)fixedType.Length!.Value), false);
+        var envelope = WrapDynamicArray(elementPointer, lengthConst, dynamicType);
+        return ConvertOwnership(envelope, KokosOwnershipKind.Owned, to, dynamicType, dynamicType);
     }
 
     /// <summary>The payload half of an envelope (index 1 — index 0 is the generation), given a bare envelope pointer.</summary>
@@ -608,21 +669,233 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     }
 
     /// <summary>
-    /// Resolves a struct-typed value down to a pointer at its field-body layout, regardless of
-    /// ownership: `owned`/`unowned`/`manual` all point at the *envelope* (generation + body) and need
-    /// <see cref="GetBody"/> (plus, for `unowned`/`manual`, a generation check first via
-    /// <see cref="CheckGenerationOrTrap"/>); `unmanaged` already points directly at the body — it was
-    /// never wrapped in an envelope in the first place (a foreign C pointer has no generation to
-    /// check), so it passes through unchanged. Shared by every field dereference (read or write).
+    /// Resolves a generation-tracked value (a struct or a managed array) down to a pointer at its
+    /// body layout, regardless of ownership: `owned`/`unowned`/`manual` all point at the *envelope*
+    /// (generation + body) and need <see cref="GetBody"/> (plus, for `unowned`/`manual`, a generation
+    /// check first via <see cref="CheckGenerationOrTrap"/>); `unmanaged` already points directly at
+    /// the body — it was never wrapped in an envelope in the first place (a foreign C pointer has no
+    /// generation to check), so it passes through unchanged. Shared by every field/element dereference
+    /// (read or write). Note that "the body" means different things depending on <paramref name="type"/>:
+    /// a struct's body is a pointer you keep GEP-ing into for individual fields; an array's body (see
+    /// <see cref="LoadElementPointerFromBody"/>) is itself a pointer *value* (or a `{length, ptr}`
+    /// struct) that needs one more load to reach the actual element pointer.
     /// </summary>
-    private LLVMValueRef ResolveBodyPointer(LLVMValueRef value, KokosOwnershipKind ownership, KokosStructType structType)
+    private LLVMValueRef ResolveBodyPointer(LLVMValueRef value, KokosOwnershipKind ownership, KokosType type)
     {
         if (ownership == KokosOwnershipKind.Unmanaged)
             return value;
 
-        var envelopeType = _typeMapper.MapEnvelope(structType);
+        var envelopeType = _typeMapper.MapEnvelope(type);
         var envelopePointer = ownership == KokosOwnershipKind.Owned ? value : CheckGenerationOrTrap(value, envelopeType, "deref");
         return GetBody(envelopePointer, envelopeType);
+    }
+
+    // --- Arrays -----------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Loads the actual `T*` element pointer out of an already-resolved array body pointer: for a
+    /// `FixedLength` array the body slot itself just *is* a `T*` (one load reaches it); for a
+    /// `Dynamic` array the body is a `{ i64 length, T* ptr }` struct (GEP to the `ptr` field, then load).
+    /// </summary>
+    private LLVMValueRef LoadElementPointerFromBody(LLVMValueRef bodyPointer, KokosArrayType arrayType)
+    {
+        var elementPointerType = LLVMTypeRef.CreatePointer(_typeMapper.Map(arrayType.ElementType), 0);
+
+        return arrayType.Kind switch
+        {
+            KokosArrayKind.FixedLength => _builder.BuildLoad2(elementPointerType, bodyPointer, "arr.ptr"),
+            KokosArrayKind.Dynamic => _builder.BuildLoad2(elementPointerType,
+                _builder.BuildStructGEP2(_typeMapper.MapArrayBody(arrayType), bodyPointer, 1, "arr.ptrfield"), "arr.ptr"),
+            _ => throw new ArgumentOutOfRangeException(nameof(arrayType), $"A '{arrayType.Kind}' array has no managed element pointer."),
+        };
+    }
+
+    /// <summary>
+    /// The bare `T*` element pointer for any array shape/ownership: `unmanaged` (or `terminated`,
+    /// which is always `unmanaged`) is already exactly that; anything else resolves the envelope
+    /// (generation-checked for `unowned`/`manual`) and loads through to the buffer pointer.
+    /// </summary>
+    private LLVMValueRef ResolveArrayElementPointer(LLVMValueRef value, KokosOwnershipKind ownership, KokosArrayType arrayType)
+    {
+        if (ownership == KokosOwnershipKind.Unmanaged || arrayType.Kind == KokosArrayKind.Terminated)
+            return value;
+
+        var bodyPointer = ResolveBodyPointer(value, ownership, arrayType);
+        return LoadElementPointerFromBody(bodyPointer, arrayType);
+    }
+
+    /// <summary>The runtime length: a compile-time constant for `FixedLength`, or a load through the resolved envelope for a managed `Dynamic` array (never called for `unmanaged`/`terminated` — the checker rejects `.length` on those).</summary>
+    private LLVMValueRef LoadArrayLength(LLVMValueRef value, KokosOwnershipKind ownership, KokosArrayType arrayType)
+    {
+        if (arrayType.Kind == KokosArrayKind.FixedLength)
+            return LLVMValueRef.CreateConstInt(Context.Int64Type, unchecked((ulong)arrayType.Length!.Value), false);
+
+        var bodyPointer = ResolveBodyPointer(value, ownership, arrayType);
+        var lengthPointer = _builder.BuildStructGEP2(_typeMapper.MapArrayBody(arrayType), bodyPointer, 0, "lenptr");
+        return _builder.BuildLoad2(Context.Int64Type, lengthPointer, "len");
+    }
+
+    /// <summary>Sign-extends a narrower integer index/length to `i64`, the width every array-length/index computation here is done in. A no-op if it's already `i64`.</summary>
+    private LLVMValueRef ExtendToInt64(LLVMValueRef value) =>
+        value.TypeOf == Context.Int64Type ? value : _builder.BuildSExt(value, Context.Int64Type, "idx64");
+
+    /// <summary>
+    /// Resolves an index expression's element pointer, bounds-checking it first unless the array is
+    /// `unmanaged`/`terminated` — "the user is allowed to use any index... but it is unsafe," per spec.
+    /// </summary>
+    private LLVMValueRef ComputeIndexedElementPointer(LLVMValueRef targetValue, KokosOwnershipKind ownership, KokosArrayType arrayType, LLVMValueRef indexValue)
+    {
+        var elementType = _typeMapper.Map(arrayType.ElementType);
+
+        if (ownership == KokosOwnershipKind.Unmanaged || arrayType.Kind == KokosArrayKind.Terminated)
+            return _builder.BuildGEP2(elementType, targetValue, new LLVMValueRef[] { indexValue }, "elemptr");
+
+        var length = LoadArrayLength(targetValue, ownership, arrayType);
+        CheckIndexInBoundsOrTrap(indexValue, length);
+        var elementPointer = ResolveArrayElementPointer(targetValue, ownership, arrayType);
+        return _builder.BuildGEP2(elementType, elementPointer, new LLVMValueRef[] { indexValue }, "elemptr");
+    }
+
+    /// <summary>The bounds-check trap: `0 <= index < length`, structured exactly like <see cref="CheckGenerationOrTrap"/>'s trap/continue block pair, just with a two-part comparison instead of a generation-equality one.</summary>
+    private void CheckIndexInBoundsOrTrap(LLVMValueRef index, LLVMValueRef length)
+    {
+        var zero = LLVMValueRef.CreateConstInt(Context.Int64Type, 0, false);
+        var geZero = _builder.BuildICmp(LLVMIntPredicate.LLVMIntSGE, index, zero, "idx.ge0");
+        var ltLength = _builder.BuildICmp(LLVMIntPredicate.LLVMIntSLT, index, length, "idx.ltlen");
+        var inBounds = _builder.BuildAnd(geZero, ltLength, "idx.inbounds");
+
+        var trapBlock = _currentFunction.AppendBasicBlock("index.trap");
+        var continueBlock = _currentFunction.AppendBasicBlock("index.ok");
+        BuildCondBr(inBounds, continueBlock, trapBlock);
+
+        PositionAtEnd(trapBlock);
+        EmitTrap();
+
+        PositionAtEnd(continueBlock);
+    }
+
+    /// <summary>Wraps an already-allocated element buffer pointer + length into a *fresh*, owned `{ i64 generation, i64 length, T* ptr }`-shaped dynamic array envelope.</summary>
+    private LLVMValueRef WrapDynamicArray(LLVMValueRef elementBufferPointer, LLVMValueRef length, KokosArrayType dynamicType)
+    {
+        var envelopeType = _typeMapper.MapEnvelope(dynamicType);
+        var envelope = EmitMalloc(envelopeType, "arr");
+        _builder.BuildStore(LLVMValueRef.CreateConstInt(Context.Int64Type, 0, false), _builder.BuildStructGEP2(envelopeType, envelope, 0, "genptr"));
+
+        var bodyType = _typeMapper.MapArrayBody(dynamicType);
+        var bodyPointer = GetBody(envelope, envelopeType);
+        _builder.BuildStore(length, _builder.BuildStructGEP2(bodyType, bodyPointer, 0, "lenptr"));
+        _builder.BuildStore(elementBufferPointer, _builder.BuildStructGEP2(bodyType, bodyPointer, 1, "ptrptr"));
+
+        return envelope;
+    }
+
+    /// <summary>Wraps an already-allocated element buffer pointer into a *fresh*, owned `{ i64 generation, T* ptr }`-shaped fixed-length array envelope.</summary>
+    private LLVMValueRef WrapFixedArray(LLVMValueRef elementBufferPointer, KokosArrayType fixedType)
+    {
+        var envelopeType = _typeMapper.MapEnvelope(fixedType);
+        var envelope = EmitMalloc(envelopeType, "arr");
+        _builder.BuildStore(LLVMValueRef.CreateConstInt(Context.Int64Type, 0, false), _builder.BuildStructGEP2(envelopeType, envelope, 0, "genptr"));
+        _builder.BuildStore(elementBufferPointer, GetBody(envelope, envelopeType));
+        return envelope;
+    }
+
+    /// <summary>
+    /// Fills every one of `tripCount` elements starting at `elementBufferPointer` with `fillValue` —
+    /// the codegen half of `[value # length]`. A plain three-block (cond/body/end) runtime loop,
+    /// structurally identical to <see cref="VisitWhileStatement"/>'s — needed because a *dynamic*
+    /// array's trip count is only known at runtime (a fixed-length array's is a compile-time constant,
+    /// but reuses this same loop rather than a separate unrolled path, for one uniform code path).
+    /// </summary>
+    private void EmitFillLoop(LLVMValueRef elementBufferPointer, LLVMValueRef tripCount, LLVMValueRef fillValue)
+    {
+        var indexPointer = _builder.BuildAlloca(Context.Int64Type, "fill.i");
+        _builder.BuildStore(LLVMValueRef.CreateConstInt(Context.Int64Type, 0, false), indexPointer);
+
+        var condBlock = _currentFunction.AppendBasicBlock("fill.cond");
+        var bodyBlock = _currentFunction.AppendBasicBlock("fill.body");
+        var endBlock = _currentFunction.AppendBasicBlock("fill.end");
+
+        BuildBr(condBlock);
+
+        PositionAtEnd(condBlock);
+        var i = _builder.BuildLoad2(Context.Int64Type, indexPointer, "fill.iv");
+        var continueLoop = _builder.BuildICmp(LLVMIntPredicate.LLVMIntSLT, i, tripCount, "fill.cmp");
+        BuildCondBr(continueLoop, bodyBlock, endBlock);
+
+        PositionAtEnd(bodyBlock);
+        var elementPointer = _builder.BuildGEP2(fillValue.TypeOf, elementBufferPointer, new LLVMValueRef[] { i }, "fill.elemptr");
+        _builder.BuildStore(fillValue, elementPointer);
+        var next = _builder.BuildAdd(i, LLVMValueRef.CreateConstInt(Context.Int64Type, 1, false), "fill.next");
+        _builder.BuildStore(next, indexPointer);
+        BuildBr(condBlock);
+
+        PositionAtEnd(endBlock);
+    }
+
+    public LLVMValueRef VisitArrayConstruction(KokosArrayConstructionNode node) =>
+        GenerateArrayConstruction(node, (KokosArrayType)_checker.ExpressionTypes[node]);
+
+    /// <summary>
+    /// `[value # length]`. A `value`-flavored (vector) result is never inferred by construction syntax
+    /// alone in this phase (see <see cref="KokosTypeChecker.VisitArrayConstruction"/>) — codegen still
+    /// handles it here for completeness/symmetry with the type mapper, unrolling into
+    /// <c>BuildInsertElement</c> calls since a vector's element count is always compile-time-known and
+    /// typically small. Otherwise: allocate a raw element buffer sized `elementSize * tripCount` (a
+    /// runtime multiply for `Dynamic`, a compile-time constant for `FixedLength`), fill it via
+    /// <see cref="EmitFillLoop"/>, then wrap it in a fresh, owned envelope
+    /// (<see cref="WrapDynamicArray"/>/<see cref="WrapFixedArray"/>) — <see cref="ConvertOwnership"/>
+    /// (already applied by the caller, e.g. <see cref="VisitVarDecl"/>) handles any further
+    /// reborrow/strip down to the position's actual target ownership.
+    /// </summary>
+    private LLVMValueRef GenerateArrayConstruction(KokosArrayConstructionNode node, KokosArrayType arrayType)
+    {
+        var value = node.Value.Accept(this);
+
+        if (arrayType.IsValueType)
+        {
+            var vectorType = _typeMapper.Map(arrayType);
+            var vector = vectorType.Undef;
+            for (var i = 0UL; i < (ulong)arrayType.Length!.Value; i++)
+            {
+                var index = LLVMValueRef.CreateConstInt(Context.Int32Type, i, false);
+                vector = _builder.BuildInsertElement(vector, value, index, "vec.init");
+            }
+
+            return vector;
+        }
+
+        var elementLlvmType = _typeMapper.Map(arrayType.ElementType);
+        var elementPointerType = LLVMTypeRef.CreatePointer(elementLlvmType, 0);
+        var tripCount = arrayType.Kind == KokosArrayKind.FixedLength
+            ? LLVMValueRef.CreateConstInt(Context.Int64Type, unchecked((ulong)arrayType.Length!.Value), false)
+            : ExtendToInt64(node.Length.Accept(this));
+
+        var byteCount = _builder.BuildMul(elementLlvmType.SizeOf, tripCount, "arr.bytes");
+        var elementBufferPointer = _builder.BuildBitCast(EmitMallocBytes(byteCount, "arr.buf"), elementPointerType, "arr.buf");
+
+        EmitFillLoop(elementBufferPointer, tripCount, value);
+
+        return arrayType.Kind == KokosArrayKind.Dynamic
+            ? WrapDynamicArray(elementBufferPointer, tripCount, arrayType)
+            : WrapFixedArray(elementBufferPointer, arrayType);
+    }
+
+    public LLVMValueRef VisitIndex(KokosIndexNode node)
+    {
+        var targetType = (KokosArrayType)_checker.ExpressionTypes[node.Target];
+        var indexValue = ExtendToInt64(node.Index.Accept(this));
+
+        if (targetType.IsValueType)
+        {
+            CheckIndexInBoundsOrTrap(indexValue, LLVMValueRef.CreateConstInt(Context.Int64Type, unchecked((ulong)targetType.Length!.Value), false));
+            var vector = node.Target.Accept(this);
+            return _builder.BuildExtractElement(vector, indexValue, "elem");
+        }
+
+        var ownership = GetOwnership(node.Target);
+        var targetValue = node.Target.Accept(this);
+        var elementPointer = ComputeIndexedElementPointer(targetValue, ownership, targetType, indexValue);
+        return _builder.BuildLoad2(_typeMapper.Map(targetType.ElementType), elementPointer, "elem");
     }
 
     private LLVMValueRef ExtractPointer(LLVMValueRef referencePair) => _builder.BuildExtractValue(referencePair, 0, "ptr");
@@ -665,8 +938,11 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     /// it, via a manually-declared <c>malloc</c> (see the constructor for why — the <c>BuildMalloc</c>
     /// convenience wrapper hard-codes a 32-bit size that doesn't match the real platform ABI).
     /// </summary>
-    private LLVMValueRef EmitMalloc(LLVMTypeRef type, string name) =>
-        _builder.BuildCall2(_mallocFunctionType, _mallocFunction, new LLVMValueRef[] { type.SizeOf }, name);
+    private LLVMValueRef EmitMalloc(LLVMTypeRef type, string name) => EmitMallocBytes(type.SizeOf, name);
+
+    /// <summary>The runtime-byte-count sibling of <see cref="EmitMalloc"/> — needed wherever the allocation size isn't a compile-time-constant type size, e.g. a dynamic array's `elementSize * length`.</summary>
+    private LLVMValueRef EmitMallocBytes(LLVMValueRef byteCount, string name) =>
+        _builder.BuildCall2(_mallocFunctionType, _mallocFunction, new LLVMValueRef[] { byteCount }, name);
 
     /// <summary>Bumps an allocation's generation (invalidating every outstanding `unowned`/`manual` reference to it) and releases its memory via the manually-declared `free`. Shared by explicit `free()` (after a double-free check) and compiler-inserted release of an unconsumed `owned` binding at scope-end (no check needed there — the move checker already proved it can't be released twice).</summary>
     private void EmitRelease(LLVMValueRef envelopePointer, LLVMTypeRef envelopeType)
@@ -695,7 +971,7 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         {
             var binding = _scope[name];
             var envelopePointer = _builder.BuildLoad2(binding.Type, binding.Pointer, "release.load");
-            var envelopeType = _typeMapper.MapEnvelope((KokosStructType)binding.KokosType);
+            var envelopeType = _typeMapper.MapEnvelope(binding.KokosType);
             EmitRelease(envelopePointer, envelopeType);
         }
     }
@@ -724,7 +1000,8 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         {
             var argumentExpression = node.Arguments.Items[i].Expression;
             var value = argumentExpression.Accept(this);
-            args[i] = ConvertOwnership(value, GetOwnership(argumentExpression), calleeFunctionType.ParameterOwnership[i], calleeFunctionType.ParameterTypes[i]);
+            args[i] = ConvertOwnership(value, GetOwnership(argumentExpression), calleeFunctionType.ParameterOwnership[i],
+                _checker.ExpressionTypes[argumentExpression], calleeFunctionType.ParameterTypes[i]);
         }
 
         // A void-returning call must be given an empty name — LLVM rejects naming a void value.
@@ -758,7 +1035,7 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
                 var argument = arguments[i];
                 var field = (argument.Name is not null ? structType.FindField(argument.Name) : structType.FindField(i))!;
                 var value = argument.Expression.Accept(this);
-                var converted = ConvertOwnership(value, GetOwnership(argument.Expression), field.Ownership, field.Type);
+                var converted = ConvertOwnership(value, GetOwnership(argument.Expression), field.Ownership, _checker.ExpressionTypes[argument.Expression], field.Type);
                 aggregate = _builder.BuildInsertValue(aggregate, converted, (uint)field.OrdinalPosition, "ctor");
             }
 
@@ -776,7 +1053,7 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
             var argument = arguments[i];
             var field = (argument.Name is not null ? structType.FindField(argument.Name) : structType.FindField(i))!;
             var value = argument.Expression.Accept(this);
-            var converted = ConvertOwnership(value, GetOwnership(argument.Expression), field.Ownership, field.Type);
+            var converted = ConvertOwnership(value, GetOwnership(argument.Expression), field.Ownership, _checker.ExpressionTypes[argument.Expression], field.Type);
             var fieldPointer = _builder.BuildStructGEP2(_typeMapper.MapStructBody(structType), bodyPointer, (uint)field.OrdinalPosition, "fieldptr");
             _builder.BuildStore(converted, fieldPointer);
         }
@@ -802,6 +1079,13 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     public LLVMValueRef VisitMemberAccess(KokosMemberAccessNode node)
     {
         var targetType = _checker.ExpressionTypes[node.Target];
+
+        if (targetType is KokosArrayType arrayType && node.MemberName == "length")
+        {
+            var arrayOwnership = GetOwnership(node.Target);
+            var arrayValue = node.Target.Accept(this);
+            return LoadArrayLength(arrayValue, arrayOwnership, arrayType);
+        }
 
         if (targetType is not KokosStructType structType)
         {
@@ -851,8 +1135,7 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     /// <summary>`destroyed(x)` — compares the current allocation generation against x's captured one and returns the mismatch as a plain Bool. Never traps: this is the whole point of checking safely instead of dereferencing blindly.</summary>
     public LLVMValueRef VisitDestroyedExpression(KokosDestroyedExpressionNode node)
     {
-        var structType = (KokosStructType)_checker.ExpressionTypes[node.Operand];
-        var envelopeType = _typeMapper.MapEnvelope(structType);
+        var envelopeType = _typeMapper.MapEnvelope(_checker.ExpressionTypes[node.Operand]);
         var referencePair = node.Operand.Accept(this);
 
         var pointer = ExtractPointer(referencePair);
@@ -865,8 +1148,7 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     /// <summary>`free(m)` — a double-free is exactly a stale-reference use per spec, so it's checked (and traps on mismatch) the same way an ordinary dereference is, before bumping the generation and releasing the memory.</summary>
     public LLVMValueRef VisitFreeStatement(KokosFreeStatementNode node)
     {
-        var structType = (KokosStructType)_checker.ExpressionTypes[node.Operand];
-        var envelopeType = _typeMapper.MapEnvelope(structType);
+        var envelopeType = _typeMapper.MapEnvelope(_checker.ExpressionTypes[node.Operand]);
         var referencePair = node.Operand.Accept(this);
 
         var pointer = CheckGenerationOrTrap(referencePair, envelopeType, "free");

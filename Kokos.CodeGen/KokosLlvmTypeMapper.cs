@@ -58,15 +58,30 @@ public sealed class KokosLlvmTypeMapper
 
         KokosStructType referenceStructType => LLVMTypeRef.CreatePointer(MapEnvelope(referenceStructType), 0),
 
-        // Every array flavor (dynamic/fixed/terminated) is carried as a raw pointer to its element
-        // type, per spec — the checker already guarantees any array-typed position reaching codegen is
-        // `unmanaged` (arrays have no generation-tracked representation yet, a separate future phase),
-        // so `ownership` doesn't need to be consulted here at all.
-        KokosArrayType arrayType => LLVMTypeRef.CreatePointer(Map(arrayType.ElementType), 0),
+        // A `value [T # N]` array is a real LLVM vector, copied by value — checked before the
+        // ownership-based arms below, since a value-shaped array has no ownership concept at all
+        // (mirrors the value-struct arm above).
+        KokosArrayType { IsValueType: true } valueArrayType =>
+            LLVMTypeRef.CreateVector(Map(valueArrayType.ElementType), (uint)valueArrayType.Length!.Value),
+
+        // A terminated array (C-string interop) is always just a bare pointer — the pointer is never
+        // Kokos's own allocation, so there's no envelope/generation to speak of regardless of ownership.
+        KokosArrayType { Kind: KokosArrayKind.Terminated } terminatedType =>
+            LLVMTypeRef.CreatePointer(Map(terminatedType.ElementType), 0),
+
+        // `unmanaged` is always just a bare pointer to the element type — no length field at all
+        // (per spec, "unmanaged arrays dont have a length field"), regardless of Dynamic/FixedLength.
+        KokosArrayType arrayType when ownership == KokosOwnershipKind.Unmanaged =>
+            LLVMTypeRef.CreatePointer(Map(arrayType.ElementType), 0),
+
+        KokosArrayType arrayType when ownership is KokosOwnershipKind.Unowned or KokosOwnershipKind.Manual =>
+            _context.GetStructType([LLVMTypeRef.CreatePointer(MapEnvelope(arrayType), 0), _context.Int64Type], Packed: false),
+
+        KokosArrayType arrayType => LLVMTypeRef.CreatePointer(MapEnvelope(arrayType), 0),
 
         _ => throw new NotSupportedException(
             $"{type.GetType().Name} ('{type.DisplayName}') has no LLVM representation yet — " +
-            "enums/arrays/optionals/unions still need a chosen representation."),
+            "enums/optionals/unions still need a chosen representation."),
     };
 
     /// <summary>
@@ -94,14 +109,36 @@ public sealed class KokosLlvmTypeMapper
     }
 
     /// <summary>
-    /// A reference struct's actual heap allocation shape: `{ i64 generation, body }`. Every heap
-    /// allocation (Phase G) carries a generation counter alongside its data, uniformly, per spec.
-    /// This is an anonymous (unnamed) LLVM struct type, which LLVM already structurally interns per
-    /// context — no memoization needed here the way the *named* body type requires it for recursive
-    /// self-reference support.
+    /// A generation-tracked allocation's actual heap shape: `{ i64 generation, body }`. Every managed
+    /// heap allocation — a reference struct (Phase G) or, as of the real-arrays phase, a managed
+    /// dynamic/fixed-length array — carries a generation counter alongside its data, uniformly, per
+    /// spec. This is an anonymous (unnamed) LLVM struct type, which LLVM already structurally interns
+    /// per context — no memoization needed here the way the *named* struct body type requires it for
+    /// recursive self-reference support.
     /// </summary>
-    public LLVMTypeRef MapEnvelope(KokosStructType structType) =>
-        _context.GetStructType([_context.Int64Type, MapStructBody(structType)], Packed: false);
+    public LLVMTypeRef MapEnvelope(KokosType type) =>
+        _context.GetStructType([_context.Int64Type, MapBody(type)], Packed: false);
+
+    /// <summary>The payload half of an envelope, for whichever kind of generation-tracked allocation <paramref name="type"/> is.</summary>
+    private LLVMTypeRef MapBody(KokosType type) => type switch
+    {
+        KokosStructType structType => MapStructBody(structType),
+        KokosArrayType arrayType => MapArrayBody(arrayType),
+        _ => throw new NotSupportedException($"{type.GetType().Name} ('{type.DisplayName}') has no envelope body representation."),
+    };
+
+    /// <summary>
+    /// A managed array's payload layout (never called for `unmanaged` — see <see cref="Map"/> — since
+    /// an unmanaged array is always just a bare element pointer with no envelope at all): `Dynamic` is
+    /// `{ i64 length, T* ptr }`; `FixedLength` is a bare `T*` (the length is compile-time-only, per
+    /// spec — never stored). `Terminated` never reaches this (checker restricts it to `unmanaged`).
+    /// </summary>
+    public LLVMTypeRef MapArrayBody(KokosArrayType arrayType) => arrayType.Kind switch
+    {
+        KokosArrayKind.Dynamic => _context.GetStructType([_context.Int64Type, LLVMTypeRef.CreatePointer(Map(arrayType.ElementType), 0)], Packed: false),
+        KokosArrayKind.FixedLength => LLVMTypeRef.CreatePointer(Map(arrayType.ElementType), 0),
+        _ => throw new NotSupportedException($"A '{arrayType.Kind}' array has no managed envelope body — it's 'unmanaged'-only."),
+    };
 
     private LLVMTypeRef MapPrimitive(KokosPrimitiveType primitive) => primitive.Kind switch
     {

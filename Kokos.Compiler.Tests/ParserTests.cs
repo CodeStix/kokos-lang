@@ -171,7 +171,7 @@ public class ParserTests
     public void Parses_all_three_array_type_flavors()
     {
         var unit = KokosParser.Parse(
-            "function f(a: [Int], b: length(4) [Int], c: terminated [Int8]) {}",
+            "function f(a: [Int], b: [Int # 4], c: terminated [Int8]) {}",
             out var diagnostics);
         Assert.False(diagnostics.HasErrors);
 

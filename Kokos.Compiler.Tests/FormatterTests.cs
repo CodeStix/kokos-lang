@@ -157,7 +157,7 @@ public class FormatterTests
             opaque type String=[Int8];
             type EnumTest=Person|Fruit;
             type MaybeInt=Int?;
-            type Buffer=length(4)[Int];
+            type Buffer=[Int#4];
             type CStr=terminated[Int8];
             """,
             out var diagnostics);
@@ -173,7 +173,7 @@ public class FormatterTests
 
             type MaybeInt = Int?;
 
-            type Buffer = length(4) [Int];
+            type Buffer = [Int # 4];
 
             type CStr = terminated [Int8];
 

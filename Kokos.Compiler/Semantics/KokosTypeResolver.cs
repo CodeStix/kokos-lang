@@ -169,13 +169,13 @@ public sealed class KokosTypeResolver : IKokosVisitor<KokosType>
             var type = Resolve(fieldNode.Type);
             var ownership = KokosModifierMapper.OwnershipOf(fieldNode.Type, type, KokosOwnershipKind.Owned);
 
-            // VisitModifiedType already rejects the wrong *explicit* modifier on an array; this catches
-            // the remaining case — no modifier at all, silently defaulting to `Owned`, which has no
-            // representation for an array.
-            if (type is KokosArrayType && ownership != KokosOwnershipKind.Unmanaged)
+            // A terminated array exists purely for C-string interop — the pointer is never Kokos's own
+            // allocation to generation-track, so it stays 'unmanaged'-only. Dynamic/fixed-length
+            // arrays now get the same real ownership defaulting a struct field already gets.
+            if (type is KokosArrayType { Kind: KokosArrayKind.Terminated } && ownership != KokosOwnershipKind.Unmanaged)
             {
                 _diagnostics.ReportError(fieldNode.Type.GetTokens().First().Span,
-                    "Arrays are only supported as 'unmanaged' in this phase; annotate this field with 'unmanaged'.");
+                    "A 'terminated' array is only supported as 'unmanaged'; annotate this field with 'unmanaged'.");
             }
 
             fields.Add(new KokosStructField(fieldNode.Name, fieldNode.IndexToken is not null, i, type, ownership));
@@ -192,7 +192,13 @@ public sealed class KokosTypeResolver : IKokosVisitor<KokosType>
     /// shape)" requirement, implemented as reference-equality-after-interning rather than a custom
     /// <c>Equals</c> override on every composite type.
     /// </summary>
-    private KokosType Intern(KokosType type)
+    /// <summary>
+    /// Public so <see cref="KokosTypeChecker"/> can intern a structurally-anonymous type it infers
+    /// itself (e.g. an array construction expression's type — there's no <see cref="KokosTypeNode"/>
+    /// for it to call <see cref="Resolve"/> on) into the exact same shared cache used for one written
+    /// out in source, so the two remain reference-equal.
+    /// </summary>
+    public KokosType Intern(KokosType type)
     {
         if (_structuralCache.TryGetValue(type.DisplayName, out var cached))
             return cached;
@@ -226,13 +232,31 @@ public sealed class KokosTypeResolver : IKokosVisitor<KokosType>
         return KokosErrorType.Instance;
     }
 
-    public KokosType VisitArrayType(KokosArrayTypeNode node) =>
-        Intern(new KokosArrayType(KokosArrayKind.Dynamic, Resolve(node.ElementType)));
+    public KokosType VisitArrayType(KokosArrayTypeNode node)
+    {
+        if (node.ValueKeyword is not null)
+        {
+            _diagnostics.ReportError(node.ValueKeyword.Span,
+                "'value' can only modify a fixed-length array ('value [T # N]') — a dynamic array's " +
+                "length isn't known at compile time, so it can never be an LLVM vector.");
+        }
+
+        return Intern(new KokosArrayType(KokosArrayKind.Dynamic, Resolve(node.ElementType)));
+    }
 
     public KokosType VisitFixedLengthArrayType(KokosFixedLengthArrayTypeNode node)
     {
         var length = long.TryParse(node.SizeToken.Text, out var n) ? n : 0;
-        return Intern(new KokosArrayType(KokosArrayKind.FixedLength, Resolve(node.ElementType), length));
+        var elementType = Resolve(node.ElementType);
+
+        if (node.ValueKeyword is not null && elementType is not (KokosPrimitiveType or KokosBoolType))
+        {
+            _diagnostics.ReportError(node.ValueKeyword.Span,
+                $"'value [{elementType.DisplayName} # {length}]' isn't supported — an LLVM vector's " +
+                "element type must be a primitive or Bool.");
+        }
+
+        return Intern(new KokosArrayType(KokosArrayKind.FixedLength, elementType, length, node.ValueKeyword is not null));
     }
 
     public KokosType VisitTerminatedArrayType(KokosTerminatedArrayTypeNode node) =>
@@ -260,14 +284,14 @@ public sealed class KokosTypeResolver : IKokosVisitor<KokosType>
                 $"around, but '{innerType.DisplayName}' is a value type.");
         }
 
-        // Arrays have no generation-tracked representation yet (a separate future phase) — the only
-        // pointer they can be is a bare, untracked one, so `owned`/`unowned`/`manual` on an array type
-        // is rejected here rather than silently producing something codegen has no shape for.
-        if (innerType is KokosArrayType && node.ModifierToken.Kind != TokenKind.UnmanagedKeyword)
+        // A terminated array exists purely for C-string interop — the pointer is never Kokos's own
+        // allocation, so it stays 'unmanaged'-only. Dynamic/fixed-length arrays now support the full
+        // owned/unowned/manual/unmanaged spectrum, same as a reference struct.
+        if (innerType is KokosArrayType { Kind: KokosArrayKind.Terminated } && node.ModifierToken.Kind != TokenKind.UnmanagedKeyword)
         {
             _diagnostics.ReportError(node.ModifierToken.Span,
-                $"'{node.ModifierToken.Text}' cannot modify an array type; arrays are only supported as " +
-                $"'unmanaged' in this phase.");
+                $"'{node.ModifierToken.Text}' cannot modify a 'terminated' array; it's only supported as " +
+                $"'unmanaged'.");
         }
 
         return innerType;
@@ -307,6 +331,8 @@ public sealed class KokosTypeResolver : IKokosVisitor<KokosType>
     public KokosType VisitArgument(KokosArgumentNode node) => throw NotAType(nameof(KokosArgumentNode));
     public KokosType VisitParenthesized(KokosParenthesizedExpressionNode node) => throw NotAType(nameof(KokosParenthesizedExpressionNode));
     public KokosType VisitDestroyedExpression(KokosDestroyedExpressionNode node) => throw NotAType(nameof(KokosDestroyedExpressionNode));
+    public KokosType VisitArrayConstruction(KokosArrayConstructionNode node) => throw NotAType(nameof(KokosArrayConstructionNode));
+    public KokosType VisitIndex(KokosIndexNode node) => throw NotAType(nameof(KokosIndexNode));
     public KokosType VisitTypeAlias(KokosTypeAliasNode node) => throw NotAType(nameof(KokosTypeAliasNode));
     public KokosType VisitEnumDecl(KokosEnumDeclNode node) => throw NotAType(nameof(KokosEnumDeclNode));
     public KokosType VisitEnumVariant(KokosEnumVariantNode node) => throw NotAType(nameof(KokosEnumVariantNode));
