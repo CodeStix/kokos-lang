@@ -1424,6 +1424,36 @@ public class TypeCheckerTests
         Assert.True(diagnostics.HasErrors);
     }
 
+    // --- Ownership modifiers behind a transparent type alias --------------------------------------
+
+    [Fact]
+    public void An_ownership_modifier_baked_into_a_transparent_alias_applies_at_a_plain_usage_site()
+    {
+        const string source = """
+            type CString = unmanaged [Int8];
+            import function puts(str: CString);
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[1]);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void An_ownership_modifier_behind_an_opaque_alias_does_not_apply_at_a_plain_usage_site()
+    {
+        const string source = """
+            opaque type CString = unmanaged [Int8];
+            import function puts(str: CString);
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[1]);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
     // --- Static variables ------------------------------------------------------------------------
 
     [Fact]

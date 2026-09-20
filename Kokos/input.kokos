@@ -4,9 +4,15 @@ type CString = unmanaged [Int8];
 
 import function puts(str: CString);
 
-export function main(): Int32 {
 
-    puts("stijn");
 
-    return 0;
+export function main() {
+    let str = "stijn";
+
+    let i = 100;
+    while i > 0 {
+        puts(str);
+        i = i - 1;
+    }
+    return str.length;
 }

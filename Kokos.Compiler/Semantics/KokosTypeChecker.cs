@@ -231,7 +231,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             return cached;
 
         var type = _resolver.Resolve(node.Type);
-        var ownership = KokosModifierMapper.OwnershipOf(node.Type, type, KokosOwnershipKind.Owned);
+        var ownership = KokosModifierMapper.OwnershipOf(node.Type, type, KokosOwnershipKind.Owned, _table);
         var binding = new KokosBinding(type, ownership, isStatic: true);
         _staticVariableBindings[node] = binding;
         return binding;
@@ -294,13 +294,13 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         {
             var paramType = _resolver.Resolve(parameter.Type);
             parameterTypes.Add(paramType);
-            var ownership = KokosModifierMapper.OwnershipOf(parameter.Type, paramType, KokosOwnershipKind.Unowned);
+            var ownership = KokosModifierMapper.OwnershipOf(parameter.Type, paramType, KokosOwnershipKind.Unowned, _table);
             parameterOwnership.Add(ownership);
             _scope[parameter.Name] = new KokosBinding(paramType, ownership);
         }
 
         _currentDeclaredReturnType = node.ReturnType is null ? null : _resolver.Resolve(node.ReturnType);
-        _currentDeclaredReturnOwnership = node.ReturnType is null ? null : KokosModifierMapper.OwnershipOf(node.ReturnType);
+        _currentDeclaredReturnOwnership = node.ReturnType is null ? null : KokosModifierMapper.OwnershipOf(node.ReturnType, _table);
 
         try
         {
@@ -533,7 +533,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         // back to the heap-only "owned by default" rule when the initializer's ownership can't be
         // determined at all.
         var ownership = node.Type is not null
-            ? KokosModifierMapper.OwnershipOf(node.Type, variableType, KokosOwnershipKind.Owned)
+            ? KokosModifierMapper.OwnershipOf(node.Type, variableType, KokosOwnershipKind.Owned, _table)
             : TryGetOwnership(node.Initializer, out var inferredOwnership)
                 ? inferredOwnership
                 : (variableType.IsPointerShaped ? KokosOwnershipKind.Owned : KokosOwnershipKind.Inferred);
@@ -1344,7 +1344,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
                 // Reuses the exact same defaulting rule the callee's own body-check used for this
                 // parameter — an owned-typed parameter consumes its argument; unowned is a reborrow.
                 var parameterOwnership = KokosModifierMapper.OwnershipOf(
-                    functionType.Declaration.Parameters.Items[i].Type, expectedType, KokosOwnershipKind.Unowned);
+                    functionType.Declaration.Parameters.Items[i].Type, expectedType, KokosOwnershipKind.Unowned, _table);
 
                 if (parameterOwnership == KokosOwnershipKind.Owned)
                     MarkTransferred(argument.Expression);

@@ -728,6 +728,29 @@ public class CodeGenTests
         Assert.Equal(5, f());
     }
 
+    [Fact]
+    public void Unmanaged_modifier_behind_a_transparent_alias_applies_at_a_plain_parameter_site()
+    {
+        // 'CString' bakes 'unmanaged' into its own definition; 'puts' below never writes the
+        // modifier itself — it must still compile to a bare-pointer C signature, not the default
+        // 'unowned' reference-pair a plain, unmodified parameter type would otherwise get.
+        using var jit = GenerateAndJit(
+            """
+            type CString = unmanaged [Int8];
+
+            import function strlen(str: CString): Int64;
+
+            export function f(): Int64 {
+                let s = "hello";
+                return strlen(s);
+            }
+            """);
+
+        var f = jit.GetFunction<NullaryLongFunc>("f");
+
+        Assert.Equal(5, f());
+    }
+
     // --- Static variables --------------------------------------------------------------------------
 
     [Fact]

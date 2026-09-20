@@ -33,8 +33,8 @@ public enum KokosOwnershipKind
 internal static class KokosModifierMapper
 {
     /// <summary>Explicit-annotation-only lookup — used for <c>let</c> locals, which have no real default yet.</summary>
-    public static KokosOwnershipKind OwnershipOf(KokosTypeNode typeNode) =>
-        ExplicitModifierOf(typeNode) is { } modifier ? MapModifier(modifier.ModifierToken.Kind) : KokosOwnershipKind.Inferred;
+    public static KokosOwnershipKind OwnershipOf(KokosTypeNode typeNode, KokosDeclarationTable table) =>
+        ExplicitModifierOf(typeNode, table) is { } modifier ? MapModifier(modifier.ModifierToken.Kind) : KokosOwnershipKind.Inferred;
 
     /// <summary>
     /// The explicit annotation if one was written; otherwise the spec's positional default
@@ -44,26 +44,41 @@ internal static class KokosModifierMapper
     /// <paramref name="typeNode"/> is nullable so a <c>let</c> with no type annotation at all (nothing
     /// to inspect for an explicit modifier) can still go through this overload.
     /// </summary>
-    public static KokosOwnershipKind OwnershipOf(KokosTypeNode? typeNode, KokosType resolvedType, KokosOwnershipKind defaultWhenPointerShaped)
+    public static KokosOwnershipKind OwnershipOf(KokosTypeNode? typeNode, KokosType resolvedType, KokosOwnershipKind defaultWhenPointerShaped, KokosDeclarationTable table)
     {
-        if (typeNode is not null && ExplicitModifierOf(typeNode) is { } modifier)
+        if (typeNode is not null && ExplicitModifierOf(typeNode, table) is { } modifier)
             return MapModifier(modifier.ModifierToken.Kind);
 
         return resolvedType.IsPointerShaped ? defaultWhenPointerShaped : KokosOwnershipKind.Inferred;
     }
 
     /// <summary>
-    /// A modifier sits either directly on the type, or one level inside an <c>Optional</c> (<c>owned
+    /// A modifier sits either directly on the type, one level inside an <c>Optional</c> (<c>owned
     /// Person?</c> parses as <c>Optional(Modified(...))</c>, since the modifier binds before the
-    /// trailing <c>?</c> is even looked at) — never inside a <c>Union</c> member here, since a
-    /// union-typed binding has no single ownership to summarize; that stays unresolved (<see
-    /// cref="KokosOwnershipKind.Inferred"/>), consistent with <c>destroyed()</c> already only
-    /// resolving plain identifiers/field access, never a multi-variant expression.
+    /// trailing <c>?</c> is even looked at), or behind a transparent (non-<c>opaque</c>) type alias —
+    /// <c>type CString = unmanaged [Int8];</c> then a plain <c>str: CString</c> parameter must behave
+    /// exactly as if <c>unmanaged [Int8]</c> had been written directly, since a transparent alias is
+    /// "freely interchangeable with its underlying type" (see <see cref="KokosTypeAliasNode"/>) and an
+    /// ownership modifier is just as much a part of that underlying type expression as anything else
+    /// in it. An <c>opaque</c> alias deliberately does *not* forward this — it already creates a
+    /// distinct type identity from its own underlying representation, so whatever modifier its
+    /// definition happens to use stays a private implementation detail, same as its structural shape.
+    /// Never inside a <c>Union</c> member here, since a union-typed binding has no single ownership to
+    /// summarize; that stays unresolved (<see cref="KokosOwnershipKind.Inferred"/>), consistent with
+    /// <c>destroyed()</c> already only resolving plain identifiers/field access, never a multi-variant
+    /// expression.
     /// </summary>
-    private static KokosModifiedTypeNode? ExplicitModifierOf(KokosTypeNode typeNode) => typeNode switch
+    private static KokosModifiedTypeNode? ExplicitModifierOf(KokosTypeNode typeNode, KokosDeclarationTable table, HashSet<string>? visitedAliases = null) => typeNode switch
     {
         KokosModifiedTypeNode modified => modified,
         KokosOptionalTypeNode { InnerType: KokosModifiedTypeNode modified } => modified,
+        // The `visitedAliases.Add` guards against a cyclic alias chain (`type A = B; type B = A;`)
+        // recursing forever — a real cycle is already a diagnostic from the resolver's own
+        // (separate) cycle detection when the underlying *type* gets resolved; this just has to not
+        // crash the process while that happens.
+        KokosNamedTypeNode named when table.TryGetTypeAlias(named.Name, out var aliasDecl) && aliasDecl.OpaqueKeyword is null
+            && (visitedAliases ??= []).Add(named.Name) =>
+            ExplicitModifierOf(aliasDecl.Type, table, visitedAliases),
         _ => null,
     };
 
