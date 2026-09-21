@@ -212,6 +212,12 @@ public sealed class KokosFormatter : IKokosVisitor<string>
     public string VisitArrayConstruction(KokosArrayConstructionNode node) =>
         $"[{node.Value.Accept(this)} # {node.Length.Accept(this)}]";
 
+    public string VisitArrayLiteral(KokosArrayLiteralNode node) =>
+        $"[{string.Join(", ", node.Elements.Items.Select(e => e.Accept(this)))}]";
+
+    public string VisitTupleConstruction(KokosTupleConstructionNode node) =>
+        $"({string.Join(", ", node.Elements.Items.Select(e => e.Accept(this)))})";
+
     public string VisitIndex(KokosIndexNode node) => $"{node.Target.Accept(this)}[{node.Index.Accept(this)}]";
 
     public string VisitNullForgiving(KokosNullForgivingNode node) => $"{node.Target.Accept(this)}!";

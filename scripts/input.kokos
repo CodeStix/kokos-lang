@@ -61,28 +61,50 @@ export function main() {
 // i made a mistake in my previous prompt, the internal format of array should be: struct FatArrPtr {i64 gen, i64 len, struct{i64 gen, T[] inlineElements}* ptr}
 // maybe you already implemented this correct approach, but otherwise an unowned array pointer generation couldn't be compared.
 
-// please add the ability to created unnamed structs/tuples and arrays with initial values:
+// please add the ability to create unnamed structs/tuples and arrays with initial values:
+
 
 function getRegisterStatus(): (status: UInt64, flag: Bool) {
     // Return unnamed tuple
-    return (100, true); // and instantate them
+    // This code actually errors because the return type doesn't positionals
+    return (100, true); 
 }
+
+// The following variants would be valid
+function getRegisterStatus(): (status: UInt64, flag: Bool) {
+    // valid because names are specified
+    return (status: 100, flag: true); 
+}
+function getRegisterStatus(): (UInt64, Bool) {
+    // valid because the type has positionals by default because no field names where specified
+    return (100, true); 
+}
+function getRegisterStatus(): (0 status: UInt64, 1 flag: Bool) {
+    // valid because the type has positionals specified
+    return (100, true); 
+}
+
 
 function createInitialArray() {
 
-    // Creates [Person]
+    // Infers people: [Person]
     let people = [
         Person(name: "Bob"),
         Person(name: "Alice"),
     ];
 
-    // Error: unkown array type, please specify
+    // Error: cannot infer array type
     let unknownType = [];
     // ok
     let unknownType: [Int64] = [];
-    // also ok
+    // also ok, [Int64] is inferred
     let unknownType = [100i64, 123i64];
+    // error: mixing of array value types
+    let unknownType = [100i64, 123i32];
 
+    let st = getRegisterStatus();
+    print(st.status);
+    print(st.flag);
 }
 
 // i want to change the way arrays work internally. i don't like the double pointer approach and that a array length could change any time. i want to reduce its complexity by:
@@ -112,3 +134,19 @@ function expandArray(arr: owned [Int], newArrSize: Int): owned [Int] {
 
 
 
+void* block = malloc(200); // allocates at 1000
+
+auto gen_ptr = {block->generation, block};
+block->generation += 1; // memory[1000] = 1;
+free(block);
+
+// gen_ptr.gen == 0
+// block->generation == 1
+check(gen_ptr) -> fails: 0 != 1
+
+void largeBlock = malloc(1500); // allocates at 500 (overlaps with previous block that is freed)
+memset(largeBlock, 1500, 0); // set the whole block to 0
+
+// gen_ptr.gen == 0
+// block->generation == 0
+check(gen_ptr) -> OK: 0 == 0 THIS IS FATAL, THE POINTER IS VALID AGAIN BECAUSE OF THE NEWLY ALLOCATED BLOCK OVERWROTE THE GENERATION VALUE OF THE FREED POINTER

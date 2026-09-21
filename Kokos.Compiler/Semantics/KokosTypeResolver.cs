@@ -338,6 +338,8 @@ public sealed class KokosTypeResolver : IKokosVisitor<KokosType>
     public KokosType VisitParenthesized(KokosParenthesizedExpressionNode node) => throw NotAType(nameof(KokosParenthesizedExpressionNode));
     public KokosType VisitDestroyedExpression(KokosDestroyedExpressionNode node) => throw NotAType(nameof(KokosDestroyedExpressionNode));
     public KokosType VisitArrayConstruction(KokosArrayConstructionNode node) => throw NotAType(nameof(KokosArrayConstructionNode));
+    public KokosType VisitArrayLiteral(KokosArrayLiteralNode node) => throw NotAType(nameof(KokosArrayLiteralNode));
+    public KokosType VisitTupleConstruction(KokosTupleConstructionNode node) => throw NotAType(nameof(KokosTupleConstructionNode));
     public KokosType VisitIndex(KokosIndexNode node) => throw NotAType(nameof(KokosIndexNode));
     public KokosType VisitTypeAlias(KokosTypeAliasNode node) => throw NotAType(nameof(KokosTypeAliasNode));
     public KokosType VisitEnumDecl(KokosEnumDeclNode node) => throw NotAType(nameof(KokosEnumDeclNode));

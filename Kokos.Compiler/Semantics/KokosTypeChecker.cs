@@ -410,7 +410,15 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         }
 
         _currentDeclaredReturnType = node.ReturnType is null ? null : _resolver.Resolve(node.ReturnType);
-        _currentDeclaredReturnOwnership = node.ReturnType is null ? null : KokosModifierMapper.OwnershipOf(node.ReturnType, _table);
+        // Unlike a `let`'s type annotation (OwnershipOf(TypeNode, Table), explicit-only — a local has
+        // no positional default of its own to fall back on beyond VisitVarDecl's separate "owned by
+        // default" handling), a declared return type gets a real positional default the moment it's
+        // pointer-shaped, exactly like a parameter/field: a function handing back a fresh reference
+        // with no explicit modifier is assumed to hand back ownership of it, the same "owned by
+        // default" convention a struct-construction call's own result already gets.
+        _currentDeclaredReturnOwnership = node.ReturnType is null
+            ? null
+            : KokosModifierMapper.OwnershipOf(node.ReturnType, _currentDeclaredReturnType!, KokosOwnershipKind.Owned, _table);
         _currentDeclaredReadOnlyReturn = node.ReturnType is null ? null : KokosModifierMapper.IsReadOnlyOf(node.ReturnType, _table);
 
         try
@@ -1168,6 +1176,107 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         return _resolver.Intern(arrayType);
     }
 
+    /// <summary>
+    /// <c>[a, b, c]</c>, or <c>[]</c> when empty — every element its own expression, unlike
+    /// <see cref="KokosArrayConstructionNode"/>'s single repeated value. Always resolves to a
+    /// <see cref="KokosArrayKind.FixedLength"/> array sized to the element count (the element count is
+    /// as compile-time-constant as it's possible to be — it's literally how many elements were
+    /// written), which then implicitly widens to a dynamic array like any other fixed-length one when
+    /// the target position calls for one (see <see cref="IsAssignable"/>) — so there's no separate
+    /// "produce a dynamic array" case to handle here at all.
+    ///
+    /// The element type is inferred from the elements themselves, contextually adapting to
+    /// <c>_expectedType</c>'s own element type when one is available (the same mechanism a bare numeric
+    /// literal already uses) — this is what lets <c>let xs: [Int64] = [1, 2];</c> infer <c>1</c>/<c>2</c>
+    /// as <c>Int64</c> rather than the bare-literal default of <c>Int</c>. Every element after the first
+    /// must be assignable to that same element type, or it's a "mixing array element types" diagnostic.
+    /// An empty literal with no expected array type to infer from is a "cannot infer" diagnostic — there
+    /// are no elements to fall back on the way a non-empty literal always has.
+    /// </summary>
+    public KokosType VisitArrayLiteral(KokosArrayLiteralNode node)
+    {
+        var expectedUnwrapped = _expectedType is KokosAliasType aliasExpected ? aliasExpected.UnderlyingType : _expectedType;
+        var expectedArrayType = expectedUnwrapped as KokosArrayType;
+        var expectedElementType = expectedArrayType?.ElementType;
+        var elements = node.Elements.Items;
+
+        if (elements.Count == 0 && expectedElementType is null)
+        {
+            _diagnostics.ReportError(SpanOf(node),
+                "Cannot infer an element type for an empty array literal '[]'; add an explicit type annotation.");
+            return KokosErrorType.Instance;
+        }
+
+        KokosType elementType = expectedElementType ?? KokosUnknownType.Instance;
+        for (var i = 0; i < elements.Count; i++)
+        {
+            var thisElementType = CheckExpression(elements[i], expectedElementType ?? (i == 0 ? null : elementType));
+
+            if (i == 0 && expectedElementType is null)
+            {
+                elementType = thisElementType;
+                continue;
+            }
+
+            if (IsAssignable(thisElementType, expectedElementType ?? elementType))
+                continue;
+
+            var against = expectedElementType is not null
+                ? $"the array's declared element type '{expectedElementType.DisplayName}'"
+                : $"element 1's type '{elementType.DisplayName}'";
+            _diagnostics.ReportError(SpanOf(elements[i]),
+                $"Cannot mix array element types: element {i + 1} is '{thisElementType.DisplayName}', which doesn't match {against}.");
+        }
+
+        // Deliberately built as FixedLength(count) even when an empty/annotated literal's own expected
+        // type is Dynamic — never returned directly as `expectedArrayType` itself, since that would
+        // silently accept a length mismatch against an *annotated* fixed-length target (e.g. `let x:
+        // [Int8 # 5] = [];`) by construction rather than catching it through the caller's own ordinary
+        // assignability check, the same way every other array literal's length is checked.
+        var isValueType = expectedArrayType is { IsValueType: true } && expectedArrayType.Length == elements.Count;
+        var arrayType = new KokosArrayType(KokosArrayKind.FixedLength, elementType, elements.Count, isValueType);
+        return _resolver.Intern(arrayType);
+    }
+
+    /// <summary>
+    /// <c>(a, b, c)</c> or <c>(x: 1, y: 2)</c> — a tuple/unnamed-struct literal; semantically a
+    /// construction call with no callee name to look up. When <c>_expectedType</c> is itself a
+    /// struct/tuple type with a matching field count (a declared return type, an explicitly-annotated
+    /// <c>let</c>, ...), this defers entirely to <see cref="CheckConstruction"/> — the exact same
+    /// by-name-or-by-position argument matching a real construction call gets, including its
+    /// "does this type even support positional construction" gate: <c>(100, true)</c> against a
+    /// declared <c>(status: UInt64, flag: Bool)</c> return type is a real diagnostic (that type's
+    /// fields are named with no explicit index, so <c>SupportsPositionalConstruction</c> is false),
+    /// while <c>(status: 100, flag: true)</c>, <c>(100, true)</c> against <c>(UInt64, Bool)</c>, and
+    /// <c>(100, true)</c> against <c>(0 status: UInt64, 1 flag: Bool)</c> all succeed. With no matching
+    /// expected type, a fresh anonymous *value* tuple is inferred purely from the elements' own types —
+    /// value by default, since nothing here asked for heap allocation/generation tracking — carrying
+    /// over each element's own name (if it named one) as that field's name too.
+    /// </summary>
+    public KokosType VisitTupleConstruction(KokosTupleConstructionNode node)
+    {
+        var expectedUnwrapped = _expectedType is KokosAliasType aliasExpected ? aliasExpected.UnderlyingType : _expectedType;
+        var expectedStruct = expectedUnwrapped as KokosStructType;
+        var elements = node.Elements.Items;
+
+        if (expectedStruct is not null && expectedStruct.Fields.Count == elements.Count)
+            return CheckConstruction(expectedStruct, elements, node.OpenParenToken.Span, node.CloseParenToken.Span);
+
+        // No matching expected type: infer a fresh, anonymous *value* tuple purely from the elements'
+        // own types — value by default, since nothing here asked for heap allocation/generation
+        // tracking the way an explicit reference-tuple annotation would.
+        var fields = new List<KokosStructField>(elements.Count);
+        for (var i = 0; i < elements.Count; i++)
+        {
+            var elementType = CheckExpression(elements[i].Expression, null);
+            var ownership = elementType.IsPointerShaped ? KokosOwnershipKind.Owned : KokosOwnershipKind.Inferred;
+            fields.Add(new KokosStructField(elements[i].Name, hasExplicitIndex: false, i, elementType, ownership));
+        }
+
+        var tupleType = new KokosStructType(null, isValueType: true, fields);
+        return _resolver.Intern(tupleType);
+    }
+
     public KokosType VisitIndex(KokosIndexNode node)
     {
         var targetType = TypeOf(node.Target);
@@ -1309,6 +1418,8 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         // A fresh struct/array construction is always a brand-new, mutable allocation — never readonly.
         KokosCallNode { Callee: KokosIdentifierNode calleeName } when _table.TryGetStruct(calleeName.Name, out _) => false,
         KokosArrayConstructionNode => false,
+        KokosArrayLiteralNode => false,
+        KokosTupleConstructionNode => false,
 
         KokosCallNode { Callee: KokosIdentifierNode fnName } when _table.TryGetFunction(fnName.Name, out var fnDecl) =>
             GetFunctionType(fnDecl).ReturnReadOnly,
@@ -1393,6 +1504,17 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         // alone (there's no example of that in the spec), so there's no value-shaped case to skip here
         // the way the struct-construction case above has to.
         if (expression is KokosArrayConstructionNode)
+        {
+            ownership = KokosOwnershipKind.Owned;
+            return true;
+        }
+
+        // An array/tuple literal is a fresh, uniquely-owned allocation too — but, like the struct-
+        // construction case above, only when the *inferred* result actually is pointer-shaped: a
+        // `value` array literal or a value tuple has no ownership concept at all, so this deliberately
+        // checks the already-recorded result type rather than assuming Owned unconditionally.
+        if ((expression is KokosArrayLiteralNode or KokosTupleConstructionNode)
+            && _expressionTypes.TryGetValue(expression, out var literalType) && literalType.IsPointerShaped)
         {
             ownership = KokosOwnershipKind.Owned;
             return true;
@@ -1622,9 +1744,23 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         return KokosUnknownType.Instance;
     }
 
-    private KokosType CheckConstructionCall(KokosCallNode node, KokosStructType structType)
+    private KokosType CheckConstructionCall(KokosCallNode node, KokosStructType structType) =>
+        CheckConstruction(structType, node.Arguments.Items, node.OpenParenToken.Span, node.CloseParenToken.Span);
+
+    /// <summary>
+    /// Matches <paramref name="arguments"/> against <paramref name="structType"/>'s fields — by name
+    /// when an argument names one, or (only when <see cref="KokosStructType.SupportsPositionalConstruction"/>
+    /// says every field can be filled this way) by position otherwise — then checks each matched
+    /// field's assignability/ownership/readonly and reports missing/duplicate/unknown fields. Shared by
+    /// a named struct's construction call (<c>Person(name: "Bob")</c>, see
+    /// <see cref="CheckConstructionCall"/>) and a tuple literal checked against a matching expected
+    /// type (<c>(100, true)</c> against a declared <c>(status: UInt64, flag: Bool)</c> — see
+    /// <see cref="VisitTupleConstruction"/>), which are otherwise identical once reduced to this same
+    /// "struct type + argument list" shape — a tuple literal is, semantically, a construction call with
+    /// no callee name to look up.
+    /// </summary>
+    private KokosType CheckConstruction(KokosStructType structType, IReadOnlyList<KokosArgumentNode> arguments, TextSpan openSpan, TextSpan closeSpan)
     {
-        var arguments = node.Arguments.Items;
         var assignedFields = new HashSet<int>();
 
         for (var i = 0; i < arguments.Count; i++)
@@ -1640,7 +1776,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             }
             else if (!structType.SupportsPositionalConstruction)
             {
-                _diagnostics.ReportError(node.OpenParenToken.Span,
+                _diagnostics.ReportError(openSpan,
                     $"'{structType.DisplayName}' does not support positional construction (not every field declares an index).");
                 field = null;
             }
@@ -1677,7 +1813,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         var missing = structType.Fields.Where(f => !assignedFields.Contains(f.OrdinalPosition)).ToList();
         if (missing.Count > 0)
         {
-            _diagnostics.ReportError(node.CloseParenToken.Span,
+            _diagnostics.ReportError(closeSpan,
                 $"Missing required field(s) for '{structType.DisplayName}': " +
                 $"{string.Join(", ", missing.Select(f => f.Name ?? f.OrdinalPosition.ToString()))}.");
         }

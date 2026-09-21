@@ -2248,4 +2248,173 @@ public class TypeCheckerTests
 
         Assert.True(diagnostics.HasErrors);
     }
+
+    // --- Array literals ([a, b, c]) -----------------------------------------------------------------
+
+    [Fact]
+    public void An_array_literal_with_no_context_infers_a_fixed_length_array_of_the_elements_common_type()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f() { let xs = [1, 2, 3]; }");
+        CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void An_empty_array_literal_with_no_expected_type_is_a_diagnostic()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f() { let xs = []; }");
+        CheckFunction(checker, unit);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void An_empty_array_literal_with_an_explicit_annotation_is_not_a_diagnostic()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f() { let xs: [Int64] = []; }");
+        CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void An_array_literals_elements_adopt_the_annotations_element_type()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f() { let xs: [Int64] = [100, 200]; }");
+        CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Mixing_array_element_types_with_no_annotation_is_a_diagnostic()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f() { let xs = [100i64, 123i32]; }");
+        CheckFunction(checker, unit);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void An_element_that_does_not_match_the_annotations_element_type_is_a_diagnostic()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f() { let xs: [Int64] = [1i64, 2i32]; }");
+        CheckFunction(checker, unit);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void An_array_literal_of_reference_struct_elements_type_checks_cleanly()
+    {
+        const string source = """
+            struct Person { name: Int }
+
+            function f() {
+                let people = [
+                    Person(name: 1),
+                    Person(name: 2),
+                ];
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[1]);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void An_array_literal_widens_to_a_dynamic_array_when_the_target_expects_one()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f() { let xs: [Int64] = [1i64, 2i64, 3i64]; }");
+        CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    // --- Tuple literals ((a, b, c)) ------------------------------------------------------------------
+
+    [Fact]
+    public void A_tuple_literal_with_no_context_infers_a_fresh_anonymous_value_tuple()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f() { let t = (1, true); }");
+        CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void A_positional_tuple_literal_against_a_named_no_index_field_return_type_is_a_diagnostic()
+    {
+        // The corrected semantics: `(status: UInt64, flag: Bool)`'s fields are named but declare no
+        // explicit index, so SupportsPositionalConstruction is false — a purely positional literal
+        // against it is exactly as invalid as `Person(10)` would be against a struct declared the
+        // same way, per CheckConstruction's shared "does this type even support positional
+        // construction" gate.
+        var (unit, _, checker, diagnostics) = Setup(
+            "function getRegisterStatus(): (status: UInt64, flag: Bool) { return (100, true); }");
+        CheckFunction(checker, unit);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void A_named_tuple_literal_against_a_named_no_index_field_return_type_infers_each_field()
+    {
+        var (unit, _, checker, diagnostics) = Setup(
+            "function getRegisterStatus(): (status: UInt64, flag: Bool) { return (status: 100, flag: true); }");
+        var functionType = CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+        Assert.Equal("(status: UInt64, flag: Bool)", functionType.ReturnType.DisplayName);
+
+        var structType = (KokosStructType)functionType.ReturnType;
+        Assert.False(structType.IsValueType);
+    }
+
+    [Fact]
+    public void A_positional_tuple_literal_against_an_unnamed_field_return_type_is_not_a_diagnostic()
+    {
+        // `(UInt64, Bool)`'s fields are unnamed, so they're trivially positional — no explicit index
+        // needed, per SupportsPositionalConstruction's own "every unnamed field is positional" rule.
+        var (unit, _, checker, diagnostics) = Setup(
+            "function getRegisterStatus(): (UInt64, Bool) { return (100, true); }");
+        CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void A_positional_tuple_literal_against_an_explicitly_indexed_field_return_type_is_not_a_diagnostic()
+    {
+        var (unit, _, checker, diagnostics) = Setup(
+            "function getRegisterStatus(): (0 status: UInt64, 1 flag: Bool) { return (100, true); }");
+        CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void A_tuple_literal_element_mismatched_against_the_declared_type_is_a_diagnostic()
+    {
+        var (unit, _, checker, diagnostics) = Setup(
+            "function f(): (status: UInt64, flag: Bool) { return (status: true, flag: 100); }");
+        CheckFunction(checker, unit);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void A_named_tuple_literal_with_no_expected_type_carries_its_names_into_the_inferred_type()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f() { let t = (x: 1, y: 2); }");
+        CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+
+        var varDecl = (KokosVarDeclNode)((KokosBlockNode)((KokosFunctionNode)unit.Members[0]).Body!).Statements[0];
+        Assert.Equal("value (x: Int, y: Int)", checker.LocalTypes[varDecl].DisplayName);
+    }
 }

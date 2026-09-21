@@ -42,6 +42,8 @@ public interface IKokosVisitor<out T>
     T VisitParenthesized(KokosParenthesizedExpressionNode node);
     T VisitDestroyedExpression(KokosDestroyedExpressionNode node);
     T VisitArrayConstruction(KokosArrayConstructionNode node);
+    T VisitArrayLiteral(KokosArrayLiteralNode node);
+    T VisitTupleConstruction(KokosTupleConstructionNode node);
     T VisitIndex(KokosIndexNode node);
     T VisitTypeAlias(KokosTypeAliasNode node);
     T VisitEnumDecl(KokosEnumDeclNode node);

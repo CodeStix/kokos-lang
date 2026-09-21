@@ -165,6 +165,23 @@ public class RoundTripTests
                 return a;
             }
             """];
+
+        // Array/tuple literals with explicit element values.
+        yield return ["function f() { let people = [Person(name: \"Bob\"), Person(name: \"Alice\")]; }"];
+        yield return ["""
+            function f() {
+                let people = [
+                    Person(name: "Bob"),
+                    Person(name: "Alice"),
+                ];
+            }
+            """];
+        yield return ["function f() { let a: [Int64] = []; }"];
+        yield return ["function f() { let b: [Int64] = [100i64, 123i64]; }"];
+        yield return ["function f(): (status: UInt64, flag: Bool) { return (100, true); }"];
+        yield return ["function f(): (status: UInt64, flag: Bool) { return (status: 100, flag: true); }"];
+        yield return ["function f() { let t = (1, 2, 3,); }"];
+        yield return ["function f() { let t = (x: 1, y: 2); }"];
     }
 
     [Theory]

@@ -1,4 +1,5 @@
-﻿using System.Text;
+﻿using System.Linq;
+using System.Text;
 using Kokos.Compiler.Semantics;
 using Kokos.Compiler.Syntax;
 using Kokos.Compiler.Syntax.Nodes;
@@ -967,29 +968,66 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
 
     /// <summary>
     /// Allocates the single heap block backing a fresh array (`{ i64 generation, [0 x T] elements }`,
-    /// sized for exactly <paramref name="length"/> elements), fills it via <see cref="EmitFillLoop"/>,
-    /// and wraps it in a fresh, owned by-value fat pointer — its own captured generation starts at 0,
-    /// matching the heap block's freshly-initialized live generation.
+    /// sized for exactly <paramref name="length"/> elements) with its generation initialized to 0 —
+    /// shared by <see cref="ConstructArray"/> (every slot the same repeated value) and
+    /// <see cref="ConstructArrayFromElements"/> (every slot its own distinct value). The element slots
+    /// themselves are left uninitialized; filling them is the caller's job.
     /// </summary>
-    private LLVMValueRef ConstructArray(LLVMValueRef fillValue, LLVMValueRef length, KokosArrayType arrayType)
+    private LLVMValueRef AllocateArrayHeapBlock(LLVMValueRef length, KokosArrayType arrayType, LLVMTypeRef heapBlockType)
     {
         var elementLlvmType = _typeMapper.Map(arrayType.ElementType);
-        var heapBlockType = _typeMapper.MapArrayHeapBlock(arrayType);
-
         var elementsByteCount = _builder.BuildMul(elementLlvmType.SizeOf, length, "arr.elembytes");
         var byteCount = _builder.BuildAdd(heapBlockType.SizeOf, elementsByteCount, "arr.bytes");
 
         var heapBlockPointerType = LLVMTypeRef.CreatePointer(heapBlockType, 0);
         var heapBlockPointer = _builder.BuildBitCast(EmitMallocBytes(byteCount, "arr.block"), heapBlockPointerType, "arr.block");
         _builder.BuildStore(LLVMValueRef.CreateConstInt(Context.Int64Type, 0, false), _builder.BuildStructGEP2(heapBlockType, heapBlockPointer, 0, "genptr"));
+        return heapBlockPointer;
+    }
 
-        var elementBufferPointer = GetArrayElementsBasePointer(heapBlockPointer, heapBlockType);
-        EmitFillLoop(elementBufferPointer, length, fillValue);
-
+    /// <summary>Packages an already-filled heap block pointer into a fresh, owned by-value fat pointer — its own captured generation starts at 0, matching the heap block's freshly-initialized live generation.</summary>
+    private LLVMValueRef WrapArrayFatPointer(LLVMValueRef heapBlockPointer, LLVMValueRef length, KokosArrayType arrayType)
+    {
         var fatPointerType = _typeMapper.Map(arrayType, KokosOwnershipKind.Owned);
         var fatPointer = _builder.BuildInsertValue(fatPointerType.Undef, LLVMValueRef.CreateConstInt(Context.Int64Type, 0, false), 0, "arr.gen");
         fatPointer = _builder.BuildInsertValue(fatPointer, length, 1, "arr.len");
         return _builder.BuildInsertValue(fatPointer, heapBlockPointer, 2, "arr.ptr");
+    }
+
+    /// <summary>Allocates a fresh array with every slot initialized to the same repeated <paramref name="fillValue"/> — the codegen half of <c>[value # length]</c>. See <see cref="ConstructArrayFromElements"/> for the distinct-per-element counterpart (an array literal's own construction).</summary>
+    private LLVMValueRef ConstructArray(LLVMValueRef fillValue, LLVMValueRef length, KokosArrayType arrayType)
+    {
+        var heapBlockType = _typeMapper.MapArrayHeapBlock(arrayType);
+        var heapBlockPointer = AllocateArrayHeapBlock(length, arrayType, heapBlockType);
+
+        var elementBufferPointer = GetArrayElementsBasePointer(heapBlockPointer, heapBlockType);
+        EmitFillLoop(elementBufferPointer, length, fillValue);
+
+        return WrapArrayFatPointer(heapBlockPointer, length, arrayType);
+    }
+
+    /// <summary>
+    /// Allocates a fresh array and stores each of <paramref name="elementValues"/> into its own slot —
+    /// the codegen half of an array literal (<c>[a, b, c]</c>). Unlike <see cref="ConstructArray"/>'s
+    /// runtime fill loop, this always unrolls: the element count is exactly how many values were
+    /// passed in, always a compile-time constant (there's no dynamic-length array-literal syntax).
+    /// </summary>
+    private LLVMValueRef ConstructArrayFromElements(IReadOnlyList<LLVMValueRef> elementValues, KokosArrayType arrayType)
+    {
+        var heapBlockType = _typeMapper.MapArrayHeapBlock(arrayType);
+        var length = LLVMValueRef.CreateConstInt(Context.Int64Type, (ulong)elementValues.Count, false);
+        var heapBlockPointer = AllocateArrayHeapBlock(length, arrayType, heapBlockType);
+
+        var elementsBasePointer = GetArrayElementsBasePointer(heapBlockPointer, heapBlockType);
+        var elementLlvmType = _typeMapper.Map(arrayType.ElementType);
+        for (var i = 0; i < elementValues.Count; i++)
+        {
+            var index = LLVMValueRef.CreateConstInt(Context.Int64Type, (ulong)i, false);
+            var elementPointer = _builder.BuildGEP2(elementLlvmType, elementsBasePointer, new LLVMValueRef[] { index }, "lit.elemptr");
+            _builder.BuildStore(elementValues[i], elementPointer);
+        }
+
+        return WrapArrayFatPointer(heapBlockPointer, length, arrayType);
     }
 
     /// <summary>
@@ -1060,6 +1098,41 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
             : ExtendToInt64(node.Length.Accept(this));
 
         return ConstructArray(value, tripCount, arrayType);
+    }
+
+    /// <summary>
+    /// `[a, b, c]`, or `[]` when empty. `KokosTypeChecker.VisitArrayLiteral` always resolves this to a
+    /// `FixedLength` array (never inferring `value` unless an expected value-array type of the same
+    /// length said so) — the vector path here mirrors <see cref="GenerateArrayConstruction"/>'s own,
+    /// just inserting each element's own value instead of one repeated value; the heap path hands every
+    /// evaluated element straight to <see cref="ConstructArrayFromElements"/>, unconverted, matching
+    /// how <see cref="GenerateArrayConstruction"/>'s single repeated value is never ownership-converted
+    /// either — an array's element type carries no ownership tag of its own to convert to.
+    /// </summary>
+    public LLVMValueRef VisitArrayLiteral(KokosArrayLiteralNode node)
+    {
+        var arrayType = (KokosArrayType)_checker.ExpressionTypes[node];
+        var elements = node.Elements.Items;
+
+        if (arrayType.IsValueType)
+        {
+            var vectorType = _typeMapper.Map(arrayType);
+            var vector = vectorType.Undef;
+            for (var i = 0; i < elements.Count; i++)
+            {
+                var elementValue = elements[i].Accept(this);
+                var index = LLVMValueRef.CreateConstInt(Context.Int32Type, (uint)i, false);
+                vector = _builder.BuildInsertElement(vector, elementValue, index, "vec.init");
+            }
+
+            return vector;
+        }
+
+        var elementValues = new LLVMValueRef[elements.Count];
+        for (var i = 0; i < elements.Count; i++)
+            elementValues[i] = elements[i].Accept(this);
+
+        return ConstructArrayFromElements(elementValues, arrayType);
     }
 
     public LLVMValueRef VisitIndex(KokosIndexNode node)
@@ -1298,7 +1371,9 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     {
         if (node.Callee is KokosIdentifierNode calleeName && _table.TryGetStruct(calleeName.Name, out _))
         {
-            return GenerateConstructionCall(node, (KokosStructType)_checker.ExpressionTypes[node]);
+            var structType = (KokosStructType)_checker.ExpressionTypes[node];
+            var arguments = node.Arguments.Items.Select(a => (a.Name, a.Expression)).ToArray();
+            return GenerateConstruction(structType, arguments);
         }
 
         if (node.Callee is not KokosIdentifierNode calleeIdentifier || !_table.TryGetFunction(calleeIdentifier.Name, out var calleeDecl))
@@ -1334,26 +1409,29 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     /// body half) via <c>BuildStructGEP2</c>. A value struct needs no allocation at all — it's built
     /// directly as an SSA aggregate, starting from an undef value and inserting each argument in turn.
     /// Argument-to-field matching (by name, or positionally against
-    /// <see cref="KokosStructField.OrdinalPosition"/>) mirrors <c>KokosTypeChecker.CheckConstructionCall</c>
-    /// exactly, which has already fully validated this call — codegen only needs to *emit* it. Each
-    /// argument is converted to its field's declared ownership shape (see <see cref="ConvertOwnership"/>)
-    /// — this is what makes constructing e.g. a struct with an `unowned` field out of an `owned`
-    /// local work.
+    /// <see cref="KokosStructField.OrdinalPosition"/>) mirrors <c>KokosTypeChecker.CheckConstructionCall</c>/
+    /// <c>VisitTupleConstruction</c> exactly, which have already fully validated this call — codegen
+    /// only needs to *emit* it. Each argument is converted to its field's declared ownership shape (see
+    /// <see cref="ConvertOwnership"/>) — this is what makes constructing e.g. a struct with an `unowned`
+    /// field out of an `owned` local work.
+    ///
+    /// Shared by both a named struct's construction call (<c>Person(name: "Bob")</c>, arguments
+    /// possibly named) and a tuple literal's construction (<c>(100, true)</c>, always positional — see
+    /// <see cref="VisitTupleConstruction"/>), which otherwise emit identically once reduced to this same
+    /// "field name-or-null paired with its expression" shape.
     /// </summary>
-    private LLVMValueRef GenerateConstructionCall(KokosCallNode node, KokosStructType structType)
+    private LLVMValueRef GenerateConstruction(KokosStructType structType, IReadOnlyList<(string? Name, KokosExpressionNode Expression)> arguments)
     {
-        var arguments = node.Arguments.Items;
-
         if (structType.IsValueType)
         {
             var bodyType = _typeMapper.MapStructBody(structType);
             var aggregate = bodyType.Undef;
             for (var i = 0; i < arguments.Count; i++)
             {
-                var argument = arguments[i];
-                var field = (argument.Name is not null ? structType.FindField(argument.Name) : structType.FindField(i))!;
-                var value = argument.Expression.Accept(this);
-                var converted = ConvertOwnership(value, GetOwnership(argument.Expression), field.Ownership, _checker.ExpressionTypes[argument.Expression], field.Type);
+                var (name, expression) = arguments[i];
+                var field = (name is not null ? structType.FindField(name) : structType.FindField(i))!;
+                var value = expression.Accept(this);
+                var converted = ConvertOwnership(value, GetOwnership(expression), field.Ownership, _checker.ExpressionTypes[expression], field.Type);
                 aggregate = _builder.BuildInsertValue(aggregate, converted, (uint)field.OrdinalPosition, "ctor");
             }
 
@@ -1368,15 +1446,29 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         var bodyPointer = GetBody(envelope, envelopeType);
         for (var i = 0; i < arguments.Count; i++)
         {
-            var argument = arguments[i];
-            var field = (argument.Name is not null ? structType.FindField(argument.Name) : structType.FindField(i))!;
-            var value = argument.Expression.Accept(this);
-            var converted = ConvertOwnership(value, GetOwnership(argument.Expression), field.Ownership, _checker.ExpressionTypes[argument.Expression], field.Type);
+            var (name, expression) = arguments[i];
+            var field = (name is not null ? structType.FindField(name) : structType.FindField(i))!;
+            var value = expression.Accept(this);
+            var converted = ConvertOwnership(value, GetOwnership(expression), field.Ownership, _checker.ExpressionTypes[expression], field.Type);
             var fieldPointer = _builder.BuildStructGEP2(_typeMapper.MapStructBody(structType), bodyPointer, (uint)field.OrdinalPosition, "fieldptr");
             _builder.BuildStore(converted, fieldPointer);
         }
 
         return envelope;
+    }
+
+    /// <summary>
+    /// <c>(a, b, c)</c> or <c>(x: 1, y: 2)</c> — emits identically to a named struct's construction call
+    /// (see <see cref="GenerateConstruction"/>) against the exact <see cref="KokosStructType"/>
+    /// <c>KokosTypeChecker.VisitTupleConstruction</c> already resolved for this node; each element is
+    /// already a <see cref="KokosArgumentNode"/> (named or positional) exactly like a call's own
+    /// argument list, so there's nothing to adapt here at all.
+    /// </summary>
+    public LLVMValueRef VisitTupleConstruction(KokosTupleConstructionNode node)
+    {
+        var structType = (KokosStructType)_checker.ExpressionTypes[node];
+        var arguments = node.Elements.Items.Select(e => (e.Name, e.Expression)).ToArray();
+        return GenerateConstruction(structType, arguments);
     }
 
     public LLVMValueRef VisitArgument(KokosArgumentNode node) => node.Expression.Accept(this);

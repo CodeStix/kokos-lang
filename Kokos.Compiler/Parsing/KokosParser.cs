@@ -629,9 +629,40 @@ public sealed class KokosParser
             case TokenKind.OpenParen:
             {
                 var open = Advance();
-                var inner = ParseExpression();
+
+                // A tuple element can be named (`status: 100`) or positional, exactly like a call
+                // argument — reusing ParseArgument (and its own "positional can't follow named"
+                // check) is what makes `(status: 100, flag: true)` parse at all.
+                var sawNamed = false;
+                var first = ParseArgument(ref sawNamed);
+
+                // A comma after the first element means this is a tuple literal, not a parenthesized
+                // single expression — a trailing comma before ')' is tolerated (`(a, b,)`), matching
+                // the array-literal form below.
+                if (Current.Kind == TokenKind.Comma)
+                {
+                    var items = new List<KokosArgumentNode> { first };
+                    var separators = new List<KokosToken>();
+                    while (Current.Kind == TokenKind.Comma)
+                    {
+                        separators.Add(Advance());
+                        if (Current.Kind == TokenKind.CloseParen || Current.Kind == TokenKind.EndOfFile)
+                            break;
+                        items.Add(ParseArgument(ref sawNamed));
+                    }
+                    var closeTuple = Expect(TokenKind.CloseParen, "')'");
+                    return new KokosTupleConstructionNode(open, new KokosSeparatedList<KokosArgumentNode>(items, separators), closeTuple);
+                }
+
                 var close = Expect(TokenKind.CloseParen, "')'");
-                return new KokosParenthesizedExpressionNode(open, inner, close);
+
+                if (first.Name is not null)
+                {
+                    _diagnostics.ReportError(first.NameToken!.Span,
+                        "A single named element isn't a valid tuple literal (a tuple needs at least two elements) or a parenthesized expression (which can't be named).");
+                }
+
+                return new KokosParenthesizedExpressionNode(open, first.Expression, close);
             }
 
             case TokenKind.DestroyedKeyword:
@@ -646,11 +677,27 @@ public sealed class KokosParser
             case TokenKind.OpenBracket:
             {
                 var openBracket = Advance();
+
+                // Empty literal: `[]` — nothing to look ahead on.
+                if (Current.Kind == TokenKind.CloseBracket)
+                {
+                    var closeEmpty = Advance();
+                    return new KokosArrayLiteralNode(openBracket, KokosSeparatedList<KokosExpressionNode>.Empty, closeEmpty);
+                }
+
                 var value = ParseExpression();
-                var hash = Expect(TokenKind.Hash, "'#'");
-                var length = ParseExpression();
-                var closeBracket = Expect(TokenKind.CloseBracket, "']'");
-                return new KokosArrayConstructionNode(openBracket, value, hash, length, closeBracket);
+
+                if (Current.Kind == TokenKind.Hash)
+                {
+                    var hash = Advance();
+                    var length = ParseExpression();
+                    var closeBracket = Expect(TokenKind.CloseBracket, "']'");
+                    return new KokosArrayConstructionNode(openBracket, value, hash, length, closeBracket);
+                }
+
+                var (items, separators) = ParseCommaSeparatedExpressions(value, TokenKind.CloseBracket);
+                var closeLiteral = Expect(TokenKind.CloseBracket, "']'");
+                return new KokosArrayLiteralNode(openBracket, new KokosSeparatedList<KokosExpressionNode>(items, separators), closeLiteral);
             }
 
             default:
@@ -712,6 +759,33 @@ public sealed class KokosParser
     }
 
     // --- Helpers -------------------------------------------------------------
+
+    /// <summary>
+    /// The comma-continuation half of a tuple/array literal, given the already-parsed first element:
+    /// keeps consuming `, expr` pairs, tolerating a trailing comma right before <paramref name="terminator"/>
+    /// (so `(a, b,)`/`[a, b,]` parse with a dangling separator and no further item — see
+    /// <see cref="KokosSeparatedList{TNode}"/>'s own child-wiring, which already handles that shape).
+    /// Unlike <see cref="ParseSeparatedList{TNode}"/>, this never parses the *first* item itself — both
+    /// call sites need to inspect what follows that first expression (`#` vs `,`) before knowing
+    /// whether this helper applies at all.
+    /// </summary>
+    private (List<KokosExpressionNode> Items, List<KokosToken> Separators) ParseCommaSeparatedExpressions(KokosExpressionNode first, TokenKind terminator)
+    {
+        var items = new List<KokosExpressionNode> { first };
+        var separators = new List<KokosToken>();
+
+        while (Current.Kind == TokenKind.Comma)
+        {
+            separators.Add(Advance());
+
+            if (Current.Kind == terminator || Current.Kind == TokenKind.EndOfFile)
+                break;
+
+            items.Add(ParseExpression());
+        }
+
+        return (items, separators);
+    }
 
     private KokosSeparatedList<TNode> ParseSeparatedList<TNode>(TokenKind terminator, Func<TNode> parseItem)
         where TNode : KokosNode

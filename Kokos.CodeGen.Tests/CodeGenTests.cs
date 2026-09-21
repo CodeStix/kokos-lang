@@ -1421,6 +1421,140 @@ public class CodeGenTests
         Assert.Equal(7, main());
     }
 
+    // --- Array/tuple literals -------------------------------------------------------------------------
+
+    [Fact]
+    public void An_array_literal_of_reference_struct_elements_constructs_and_indexes_correctly()
+    {
+        using var jit = GenerateAndJit(
+            """
+            struct Person { age: Int }
+
+            export function main(): Int {
+                let people = [
+                    Person(age: 10),
+                    Person(age: 20),
+                ];
+
+                return people.length + people[0].age + people[1].age;
+            }
+            """);
+
+        var main = jit.GetFunction<NullaryLongFunc>("main");
+
+        Assert.Equal(32, main());
+    }
+
+    [Fact]
+    public void An_empty_array_literal_widened_to_dynamic_has_zero_length()
+    {
+        using var jit = GenerateAndJit(
+            """
+            export function main(): Int {
+                let a: [Int64] = [];
+                return a.length;
+            }
+            """);
+
+        var main = jit.GetFunction<NullaryLongFunc>("main");
+
+        Assert.Equal(0, main());
+    }
+
+    [Fact]
+    public void An_array_literal_with_explicit_element_suffixes_indexes_the_distinct_values()
+    {
+        using var jit = GenerateAndJit(
+            """
+            export function main(): Int64 {
+                let b: [Int64] = [100i64, 123i64];
+                if b.length != 2 {
+                    return -1i64;
+                }
+                return b[0] + b[1];
+            }
+            """);
+
+        var main = jit.GetFunction<NullaryLongFunc>("main");
+
+        Assert.Equal(223, main());
+    }
+
+    [Fact]
+    public void A_named_tuple_literal_against_a_declared_return_type_round_trips_through_field_access()
+    {
+        // The reported repro: a reference tuple type built and returned with no explicit ownership
+        // modifier on the declared return type — this also regression-tests the return-ownership
+        // positional default fix (an unannotated pointer-shaped return type now defaults to 'owned',
+        // the same way a parameter/field already does, instead of leaving it 'Inferred' and crashing
+        // codegen the moment the result is dereferenced). The literal is named ('status: 100, flag:
+        // true'), not positional — '(status: UInt64, flag: Bool)' declares no explicit field index, so
+        // it doesn't support positional construction (see CheckConstruction).
+        using var jit = GenerateAndJit(
+            """
+            function getRegisterStatus(): (status: UInt64, flag: Bool) {
+                return (status: 100, flag: true);
+            }
+
+            export function main(): UInt64 {
+                let st = getRegisterStatus();
+                if !st.flag {
+                    return 0u64;
+                }
+                return st.status;
+            }
+            """);
+
+        var main = jit.GetFunction<NullaryLongFunc>("main");
+
+        Assert.Equal(100, main());
+    }
+
+    [Fact]
+    public void A_positional_tuple_literal_against_an_explicitly_indexed_return_type_round_trips()
+    {
+        using var jit = GenerateAndJit(
+            """
+            function getRegisterStatus(): (0 status: UInt64, 1 flag: Bool) {
+                return (100, true);
+            }
+
+            export function main(): UInt64 {
+                let st = getRegisterStatus();
+                if !st.flag {
+                    return 0u64;
+                }
+                return st.status;
+            }
+            """);
+
+        var main = jit.GetFunction<NullaryLongFunc>("main");
+
+        Assert.Equal(100, main());
+    }
+
+    [Fact]
+    public void A_tuple_literal_with_no_expected_type_constructs_a_value_tuple_with_no_allocation()
+    {
+        var (module, generator) = GenerateModule(
+            """
+            export function main(): Int {
+                let t = (1, 2);
+                return t.0 + t.1;
+            }
+            """);
+        try
+        {
+            var ir = module.PrintToString();
+            Assert.DoesNotContain("call ptr @malloc", ir);
+        }
+        finally
+        {
+            module.Dispose();
+            generator.Context.Dispose();
+        }
+    }
+
     // --- Object file emission (`KokosObjectEmitter`) ------------------------------------------------
 
     [Fact]
