@@ -32,10 +32,83 @@ export function concat(a: String, b: String) {
 }
 
 export function main() {
+    let input = [0i8 # 100];
 
-    let l: Int8 = 0;
-    let input = [l # 100];
-    input[0] = 65;
+    gets(input);
 
     puts(input);
 }
+
+// please add support for more number literals:
+
+0xFFFFFF // hex
+0b100000000 // binary
+0b1110_1111 // underscores can be added everywhere and are just skipped during conversion
+100_000 // normal number
+
+// please also add support for number suffixes
+
+1u8 // -> 8: UInt8 
+10i32 // -> 10: Int32
+50000u64 // -> 50000: UInt64
+1u // -> 1: UInt
+10i // -> 10: Int
+12.2f // -> 12.2: Float32
+60.1d // -> 60.1d: Float64
+
+
+
+// i made a mistake in my previous prompt, the internal format of array should be: struct FatArrPtr {i64 gen, i64 len, struct{i64 gen, T[] inlineElements}* ptr}
+// maybe you already implemented this correct approach, but otherwise an unowned array pointer generation couldn't be compared.
+
+// please add the ability to created unnamed structs/tuples and arrays with initial values:
+
+function getRegisterStatus(): (status: UInt64, flag: Bool) {
+    // Return unnamed tuple
+    return (100, true); // and instantate them
+}
+
+function createInitialArray() {
+
+    // Creates [Person]
+    let people = [
+        Person(name: "Bob"),
+        Person(name: "Alice"),
+    ];
+
+    // Error: unkown array type, please specify
+    let unknownType = [];
+    // ok
+    let unknownType: [Int64] = [];
+    // also ok
+    let unknownType = [100i64, 123i64];
+
+}
+
+// i want to change the way arrays work internally. i don't like the double pointer approach and that a array length could change any time. i want to reduce its complexity by:
+// including the length of the array in the fat pointer: struct FatArrPtr {i64 gen, i64 len, struct{i64 gen, T[] inlineElements}* ptr}
+
+// please also simplyfy the fixed vs dynamic arrays:
+// when instantiating a fixed array, a FatArrPtr is created just like dynamic arrays. i expect the optimizer to optimize out the constant value used when constructing an array with fixed size
+// so during codegen, non-value fixed arrays and dynamic arrays have the same internal format.
+// value arrays keep their vector conversion
+
+// but i would like to keep the possibility to realloc in the future. in the future i could (don't implement this right now):
+
+// stdlib realloc
+import function realloc(arr: unmanaged [Int], newSize: Int): unmanaged [Int];
+
+// This function could either resize the array inplace, or free the previous array and allocate a new one, copying its data
+function expandArray(arr: owned [Int], newArrSize: Int): owned [Int] {
+    // remaining question: how to invalidate previous generation?
+    let newPtr = realloc(arr, newArrSize + sizeof(arr.length))
+    arr.length = newArrSize;
+    return newPtr;
+}
+
+
+
+
+
+
+

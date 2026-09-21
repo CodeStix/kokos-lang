@@ -29,13 +29,18 @@ public sealed class KokosLlvmTypeMapper
     }
 
     /// <summary>
-    /// <paramref name="ownership"/> only matters for a reference struct: `owned` is a bare pointer to
-    /// its envelope (the generation lives *in* the allocation — an owned handle doesn't carry a copy
-    /// of it, per spec — and dereferencing it is unchecked, since the compiler statically guarantees
-    /// its validity); `unowned`/`manual` are represented *identically* as a "reference pair"
-    /// `{ envelopePointer, i64 capturedGeneration }` — the distinction between the two is purely
-    /// compile-time (who's allowed to call `free()`), never a runtime shape difference. Every other
-    /// case ignores ownership entirely (defaulted to `Owned` so call sites that never dealt with
+    /// <paramref name="ownership"/> only matters for a reference struct or a managed array — the two
+    /// differ in exactly *where* ownership stops mattering for shape. A reference struct's `owned` is a
+    /// bare pointer to its envelope (the generation lives *in* the allocation — an owned handle doesn't
+    /// carry a copy of it, per spec — and dereferencing it is unchecked, since the compiler statically
+    /// guarantees its validity); `unowned`/`manual` are represented *identically* as a "reference pair"
+    /// `{ envelopePointer, i64 capturedGeneration }`. A managed array goes one step further: `owned`,
+    /// `unowned`, and `manual` are *all* the exact same by-value fat pointer (see
+    /// <see cref="MapArrayFatPointer"/>) — even `owned` carries its own captured generation and length
+    /// alongside the shared heap block pointer, since (unlike a struct) `length` has to be readable
+    /// without a memory access at all. Either way, the distinction between `owned`/`unowned`/`manual` is
+    /// purely compile-time (who's allowed to call `free()`), never a runtime shape difference. Every
+    /// other case ignores ownership entirely (defaulted to `Owned` so call sites that never dealt with
     /// ownership at all — arithmetic operand types, value-struct fields, ...— keep compiling
     /// unchanged). By the time codegen runs, every pointer-shaped position has a concrete
     /// `Owned`/`Unowned`/`Manual` ownership (Phase D/E's real positional defaults guarantee this), so
@@ -71,10 +76,15 @@ public sealed class KokosLlvmTypeMapper
         KokosArrayType arrayType when ownership == KokosOwnershipKind.Unmanaged =>
             LLVMTypeRef.CreatePointer(Map(arrayType.ElementType), 0),
 
-        KokosArrayType arrayType when ownership is KokosOwnershipKind.Unowned or KokosOwnershipKind.Manual =>
-            _context.GetStructType([LLVMTypeRef.CreatePointer(MapEnvelope(arrayType), 0), _context.Int64Type], Packed: false),
-
-        KokosArrayType arrayType => LLVMTypeRef.CreatePointer(MapEnvelope(arrayType), 0),
+        // `owned`/`unowned`/`manual` all share this exact same by-value "fat pointer" shape — see
+        // MapArrayFatPointer. Unlike a reference struct, an array's `owned` is never itself a bare
+        // heap pointer: 'len' has to be readable without a memory access, and only a plain value (not
+        // a pointer) can carry that safely while still letting an independently-copied `unowned`/
+        // `manual` reference see the *live* generation — that has to live in the one thing every copy
+        // still shares by reference, the heap block `ptr` points at (see MapArrayHeapBlock).
+        // Ownership stays a purely compile-time distinction here (who's allowed to call `free()`),
+        // exactly like it already is for a reference struct's `unowned`/`manual` pair.
+        KokosArrayType arrayType => MapArrayFatPointer(arrayType),
 
         // A pointer-shaped optional (`Person?`, `[Int8]?`) reuses the inner type's own representation
         // outright — null already means "no value," no extra bit needed. A value-shaped optional
@@ -114,21 +124,20 @@ public sealed class KokosLlvmTypeMapper
     }
 
     /// <summary>
-    /// A generation-tracked allocation's actual heap shape: `{ i64 generation, body }`. Every managed
-    /// heap allocation — a reference struct (Phase G) or, as of the real-arrays phase, a managed
-    /// dynamic/fixed-length array — carries a generation counter alongside its data, uniformly, per
-    /// spec. This is an anonymous (unnamed) LLVM struct type, which LLVM already structurally interns
-    /// per context — no memoization needed here the way the *named* struct body type requires it for
-    /// recursive self-reference support.
+    /// A generation-tracked *reference struct*'s actual heap shape: `{ i64 generation, body }`. A
+    /// managed array is generation-tracked too, but through a completely different, by-value fat
+    /// pointer over a single shared heap block — see <see cref="MapArrayFatPointer"/>/
+    /// <see cref="MapArrayHeapBlock"/> — so this is never called for one. This is an anonymous
+    /// (unnamed) LLVM struct type, which LLVM already structurally interns per context — no memoization
+    /// needed here the way the *named* struct body type requires it for recursive self-reference support.
     /// </summary>
     public LLVMTypeRef MapEnvelope(KokosType type) =>
         _context.GetStructType([_context.Int64Type, MapBody(type)], Packed: false);
 
-    /// <summary>The payload half of an envelope, for whichever kind of generation-tracked allocation <paramref name="type"/> is.</summary>
+    /// <summary>The payload half of an envelope, for whichever kind of generation-tracked allocation <paramref name="type"/> is. Never called for an array — see <see cref="MapArrayFatPointer"/>, whose shape is completely different.</summary>
     private LLVMTypeRef MapBody(KokosType type) => type switch
     {
         KokosStructType structType => MapStructBody(structType),
-        KokosArrayType arrayType => MapArrayBody(arrayType),
         // A pointer-shaped optional reuses its inner type's own representation outright (see `Map`),
         // so its envelope — the allocation an `owned Person?` may or may not be pointing at — is
         // exactly the inner type's own envelope. A value-shaped optional never reaches here: it isn't
@@ -138,17 +147,33 @@ public sealed class KokosLlvmTypeMapper
     };
 
     /// <summary>
-    /// A managed array's payload layout (never called for `unmanaged` — see <see cref="Map"/> — since
-    /// an unmanaged array is always just a bare element pointer with no envelope at all): `Dynamic` is
-    /// `{ i64 length, T* ptr }`; `FixedLength` is a bare `T*` (the length is compile-time-only, per
-    /// spec — never stored).
+    /// A managed array's by-value "fat pointer" — `{ i64 capturedGeneration, i64 length, HeapBlock* ptr }`
+    /// — never called for `unmanaged` (see <see cref="Map"/> — an unmanaged array is always just a bare
+    /// element pointer, no fat pointer at all) or a `value` array (a plain LLVM vector). This is never
+    /// itself heap-allocated: `owned`/`unowned`/`manual` all share this exact shape, copied by value —
+    /// see <see cref="Map"/>'s array arm. `Dynamic` and `FixedLength` (non-`value`) arrays deliberately
+    /// share this exact same shape too — a fixed array's length is just as real a runtime-readable field
+    /// as a dynamic array's, even though its value is always a compile-time constant at the point of
+    /// construction (the optimizer is trusted to fold it where it can prove the allocation doesn't
+    /// escape). This is what lets an implicit fixed-length -> dynamic conversion be a complete no-op:
+    /// the bits are already identical.
     /// </summary>
-    public LLVMTypeRef MapArrayBody(KokosArrayType arrayType) => arrayType.Kind switch
-    {
-        KokosArrayKind.Dynamic => _context.GetStructType([_context.Int64Type, LLVMTypeRef.CreatePointer(Map(arrayType.ElementType), 0)], Packed: false),
-        KokosArrayKind.FixedLength => LLVMTypeRef.CreatePointer(Map(arrayType.ElementType), 0),
-        _ => throw new NotSupportedException($"A '{arrayType.Kind}' array has no managed envelope body — it's 'unmanaged'-only."),
-    };
+    public LLVMTypeRef MapArrayFatPointer(KokosArrayType arrayType) =>
+        _context.GetStructType([_context.Int64Type, _context.Int64Type, LLVMTypeRef.CreatePointer(MapArrayHeapBlock(arrayType), 0)], Packed: false);
+
+    /// <summary>
+    /// The single heap allocation backing a managed array: `{ i64 generation, [0 x T] elements }` — the
+    /// live/shared generation counter (the one thing every value-copy of the owning
+    /// <see cref="MapArrayFatPointer"/> can compare its own captured generation against, since copying a
+    /// pointer preserves aliasing even though copying the fat pointer's own fields doesn't), followed
+    /// immediately by the element data laid out inline. The trailing zero-length array is LLVM's usual
+    /// "flexible array member" idiom — the real element count is never part of the type itself, only
+    /// ever known via the owning fat pointer's own `length` field or a runtime byte count passed to
+    /// `malloc`. One allocation per array, not two — which is also what makes a future in-place
+    /// `realloc` of *this exact block* possible.
+    /// </summary>
+    public LLVMTypeRef MapArrayHeapBlock(KokosArrayType arrayType) =>
+        _context.GetStructType([_context.Int64Type, LLVMTypeRef.CreateArray(Map(arrayType.ElementType), 0)], Packed: false);
 
     private LLVMTypeRef MapPrimitive(KokosPrimitiveType primitive) => primitive.Kind switch
     {

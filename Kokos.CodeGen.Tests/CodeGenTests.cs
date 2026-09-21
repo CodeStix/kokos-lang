@@ -1107,10 +1107,7 @@ public class CodeGenTests
             KokosOptimizer.Optimize(module, KokosOptimizationLevel.O2);
             var ir = module.PrintToString();
 
-            // Two releases survive: the element buffer and the envelope wrapping it — see
-            // Releasing_a_dynamic_array_frees_both_the_element_buffer_and_the_envelope below for the
-            // dedicated regression test covering that split.
-            Assert.Equal(2, CountOccurrences(ir, "call void @kokos.free"));
+            Assert.Equal(1, CountOccurrences(ir, "call void @kokos.free"));
             Assert.Contains("declare void @free(", ir);
         }
         finally
@@ -1147,15 +1144,14 @@ public class CodeGenTests
         return count;
     }
 
-    // --- Array release frees both allocations (`EmitRelease`) ---------------------------------------
+    // --- Array release frees exactly one allocation (`EmitRelease`) ---------------------------------
 
     [Fact]
-    public void Releasing_a_dynamic_array_frees_both_the_element_buffer_and_the_envelope()
+    public void Releasing_a_dynamic_array_frees_exactly_the_single_heap_block()
     {
-        // Regression test: WrapDynamicArray allocates the element buffer and the envelope wrapping it
-        // as two *separate* `malloc` calls (the envelope only stores a pointer to the buffer, so the
-        // envelope's own address can stay stable across a future in-place resize). EmitRelease used to
-        // free only the envelope, silently leaking the buffer on every release of an owned array.
+        // Regression test for the fat-pointer array redesign: an array is now a single `malloc`'d heap
+        // block (generation + inline elements together), not an envelope pointing at a separately
+        // allocated element buffer — so releasing an owned array should free exactly one allocation.
         var (module, generator) = GenerateModule(
             """
             export function main(): Int {
@@ -1167,7 +1163,7 @@ public class CodeGenTests
         try
         {
             var ir = module.PrintToString();
-            Assert.Equal(2, CountOccurrences(ir, "call void @kokos.free"));
+            Assert.Equal(1, CountOccurrences(ir, "call void @kokos.free"));
         }
         finally
         {
@@ -1177,7 +1173,7 @@ public class CodeGenTests
     }
 
     [Fact]
-    public void Releasing_a_fixed_length_array_frees_both_the_element_buffer_and_the_envelope()
+    public void Releasing_a_fixed_length_array_frees_exactly_the_single_heap_block()
     {
         var (module, generator) = GenerateModule(
             """
@@ -1189,7 +1185,7 @@ public class CodeGenTests
         try
         {
             var ir = module.PrintToString();
-            Assert.Equal(2, CountOccurrences(ir, "call void @kokos.free"));
+            Assert.Equal(1, CountOccurrences(ir, "call void @kokos.free"));
         }
         finally
         {
@@ -1224,6 +1220,205 @@ public class CodeGenTests
             module.Dispose();
             generator.Context.Dispose();
         }
+    }
+
+    // --- Unified fat-pointer array envelope ({ i64 gen, i64 len, T* elements }) ---------------------
+
+    [Fact]
+    public void A_fixed_length_arrays_fat_pointer_is_the_same_shape_as_a_dynamic_arrays()
+    {
+        // Regression test for the fat-pointer array redesign: a non-value fixed-length array's fat
+        // pointer used to have no length field at all (the length was compile-time-only), a genuinely
+        // different shape from a dynamic array's. Both are now the exact same by-value
+        // `{ i64 capturedGen, i64 len, ptr }` over an identically-shaped `{ i64 gen, [0 x T] }` heap
+        // block — this asserts both the fat pointer's own aggregate type and the heap block's malloc
+        // size computation are textually identical between the two.
+        var (fixedModule, fixedGenerator) = GenerateModule(
+            """
+            export function main(): Int {
+                let arr = [0 # 5];
+                return arr.length;
+            }
+            """);
+        var (dynamicModule, dynamicGenerator) = GenerateModule(
+            """
+            export function main(n: Int): Int {
+                let arr = [0 # n];
+                return arr.length;
+            }
+            """);
+        try
+        {
+            var fixedIr = fixedModule.PrintToString();
+            var dynamicIr = dynamicModule.PrintToString();
+
+            Assert.Contains("{ i64, i64, ptr }", fixedIr);
+            Assert.Contains("{ i64, i64, ptr }", dynamicIr);
+            Assert.Contains("getelementptr ({ i64, [0 x i64] }, ptr null, i32 1) to i64)", fixedIr);
+            Assert.Contains("getelementptr ({ i64, [0 x i64] }, ptr null, i32 1) to i64)", dynamicIr);
+        }
+        finally
+        {
+            fixedModule.Dispose();
+            fixedGenerator.Context.Dispose();
+            dynamicModule.Dispose();
+            dynamicGenerator.Context.Dispose();
+        }
+    }
+
+    [Fact]
+    public void Implicit_fixed_to_dynamic_array_conversion_allocates_nothing_extra()
+    {
+        // Since a fixed-length and a dynamic array now share bit-identical representation at every
+        // ownership level, the spec's implicit `[T # N] -> [T]` widening is a pure relabeling with no
+        // codegen at all (see ConvertOwnership's doc comment) — exactly one malloc total (the single
+        // heap block backing 'fixedArr'), not two from a second block being built for the widened
+        // binding.
+        var (module, generator) = GenerateModule(
+            """
+            export function main(): Int {
+                let fixedArr = [0 # 5];
+                let dynArr: [Int] = fixedArr;
+                return dynArr.length;
+            }
+            """);
+        try
+        {
+            var ir = module.PrintToString();
+            Assert.Equal(1, CountOccurrences(ir, "call ptr @malloc"));
+        }
+        finally
+        {
+            module.Dispose();
+            generator.Context.Dispose();
+        }
+    }
+
+    [Fact]
+    public void A_fixed_length_array_widened_to_dynamic_reads_the_same_underlying_data()
+    {
+        using var jit = GenerateAndJit(
+            """
+            function sumUnowned(arr: unowned [Int]): Int {
+                let total = 0;
+                let i = 0;
+                while i < arr.length {
+                    total = total + arr[i];
+                    i = i + 1;
+                }
+                return total;
+            }
+
+            export function main(): Int {
+                let fixedArr = [7 # 4];
+                let unownedFixed: unowned [Int] = fixedArr;
+                let viaUnowned = unownedFixed[2];
+
+                let dynArr: [Int] = fixedArr;
+                let unownedDyn: unowned [Int] = dynArr;
+                let sum = sumUnowned(unownedDyn);
+
+                return sum + viaUnowned;
+            }
+            """);
+
+        var main = jit.GetFunction<NullaryLongFunc>("main");
+
+        Assert.Equal(35, main());
+    }
+
+    [Fact]
+    public void Reborrowing_an_owned_array_as_unowned_emits_no_extra_instructions()
+    {
+        // Regression test for the fat-pointer array redesign: owned/unowned/manual are now the exact
+        // same by-value shape for an array (unlike a reference struct, which still genuinely reborrows
+        // — see ConvertOwnership), so converting an owned array to unowned should compile to a plain
+        // SSA value flowing through unchanged, never an insertvalue/extractvalue pair building a
+        // {pointer, capturedGeneration} reborrow the way a struct's does.
+        var (module, generator) = GenerateModule(
+            """
+            function borrow(arr: unowned [Int]): Int {
+                return arr.length;
+            }
+
+            export function main(): Int {
+                let arr = [0 # 5];
+                return borrow(arr);
+            }
+            """);
+        try
+        {
+            var ir = module.PrintToString();
+            Assert.DoesNotContain("reborrow", ir);
+        }
+        finally
+        {
+            module.Dispose();
+            generator.Context.Dispose();
+        }
+    }
+
+    [Fact]
+    public void A_fixed_length_arrays_length_access_goes_through_the_captured_fat_pointer_field()
+    {
+        // Per the redesign's intent: a fixed-length array's length lives in the fat pointer's own
+        // captured 'len' field (index 1) — read the same way a dynamic array's is (extractvalue on the
+        // in-hand aggregate), never hard-coded as a bare LLVM constant at the '.length' access site
+        // itself (codegen never special-cases FixedLength here at all — see LoadArrayLength). Whether
+        // the optimizer can later fold the whole thing back to a literal is a separate concern this
+        // test doesn't need to prove.
+        var (module, generator) = GenerateModule(
+            """
+            export function main(): Int {
+                let arr = [0 # 5];
+                return arr.length;
+            }
+            """);
+        try
+        {
+            var ir = module.PrintToString();
+            Assert.Contains("extractvalue { i64, i64, ptr }", ir);
+            Assert.DoesNotContain("ret i64 5", ir);
+        }
+        finally
+        {
+            module.Dispose();
+            generator.Context.Dispose();
+        }
+    }
+
+    [Fact]
+    public void An_optional_array_defaults_to_null_and_round_trips_through_reassignment_and_unwrap()
+    {
+        // A pointer-shaped optional array reuses the by-value fat pointer's own shape (see
+        // KokosOptionalType.ReusesInnerPointer / KokosLlvmTypeMapper.Map) — "no value" is a
+        // zeroed-out fat pointer whose shared heap block field is null, not a null fat pointer itself
+        // (it isn't a pointer at all any more). This exercises the whole lifecycle: null default,
+        // '== null', reassignment, and '!' force-unwrap through both '.length' and indexing.
+        using var jit = GenerateAndJit(
+            """
+            export function main(): Int {
+                let maybeArr: [Int]? = null;
+                let isNull1 = maybeArr == null;
+
+                maybeArr = [3 # 4];
+                let isNull2 = maybeArr == null;
+                let firstElem = maybeArr![0];
+                let len = maybeArr!.length;
+
+                if !isNull1 {
+                    return 1;
+                }
+                if isNull2 {
+                    return 2;
+                }
+                return firstElem + len;
+            }
+            """);
+
+        var main = jit.GetFunction<NullaryLongFunc>("main");
+
+        Assert.Equal(7, main());
     }
 
     // --- Object file emission (`KokosObjectEmitter`) ------------------------------------------------
