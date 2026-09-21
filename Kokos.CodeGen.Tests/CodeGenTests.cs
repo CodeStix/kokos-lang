@@ -1132,6 +1132,98 @@ public class CodeGenTests
         return (generator.Generate(unit), generator);
     }
 
+    private static int CountOccurrences(string text, string substring)
+    {
+        var count = 0;
+        var index = 0;
+        while ((index = text.IndexOf(substring, index, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            index += substring.Length;
+        }
+
+        return count;
+    }
+
+    // --- Array release frees both allocations (`EmitRelease`) ---------------------------------------
+
+    [Fact]
+    public void Releasing_a_dynamic_array_frees_both_the_element_buffer_and_the_envelope()
+    {
+        // Regression test: WrapDynamicArray allocates the element buffer and the envelope wrapping it
+        // as two *separate* `malloc` calls (the envelope only stores a pointer to the buffer, so the
+        // envelope's own address can stay stable across a future in-place resize). EmitRelease used to
+        // free only the envelope, silently leaking the buffer on every release of an owned array.
+        var (module, generator) = GenerateModule(
+            """
+            export function main(): Int {
+                let l: Int8 = 0;
+                let input = [l # 10];
+                return input.length;
+            }
+            """);
+        try
+        {
+            var ir = module.PrintToString();
+            Assert.Equal(2, CountOccurrences(ir, "call void @kokos.free"));
+        }
+        finally
+        {
+            module.Dispose();
+            generator.Context.Dispose();
+        }
+    }
+
+    [Fact]
+    public void Releasing_a_fixed_length_array_frees_both_the_element_buffer_and_the_envelope()
+    {
+        var (module, generator) = GenerateModule(
+            """
+            export function main(): Int {
+                let arr: [Int # 5] = [0 # 5];
+                return 0;
+            }
+            """);
+        try
+        {
+            var ir = module.PrintToString();
+            Assert.Equal(2, CountOccurrences(ir, "call void @kokos.free"));
+        }
+        finally
+        {
+            module.Dispose();
+            generator.Context.Dispose();
+        }
+    }
+
+    [Fact]
+    public void Releasing_an_owned_struct_frees_only_the_single_envelope_allocation()
+    {
+        // Control case: a struct's fields live inline in the same allocation as its generation
+        // header (no separate buffer indirection like an array has), so exactly one release is
+        // correct here — this pins down that EmitRelease's array-vs-struct branch doesn't
+        // over-fire for the type it was never supposed to touch.
+        var (module, generator) = GenerateModule(
+            """
+            struct Person { age: Int }
+
+            export function main(): Int {
+                let p = Person(age: 1);
+                return p.age;
+            }
+            """);
+        try
+        {
+            var ir = module.PrintToString();
+            Assert.Equal(1, CountOccurrences(ir, "call void @kokos.free"));
+        }
+        finally
+        {
+            module.Dispose();
+            generator.Context.Dispose();
+        }
+    }
+
     // --- Object file emission (`KokosObjectEmitter`) ------------------------------------------------
 
     [Fact]
