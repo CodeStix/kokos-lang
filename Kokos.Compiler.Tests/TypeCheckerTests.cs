@@ -45,6 +45,65 @@ public class TypeCheckerTests
         Assert.Same(KokosPrimitiveType.Float, functionType.ReturnType);
     }
 
+    // --- Numeric literal suffixes ------------------------------------------------------------------
+
+    [Theory]
+    [InlineData("1u8", "UInt8")]
+    [InlineData("10i32", "Int32")]
+    [InlineData("50000u64", "UInt64")]
+    [InlineData("1u", "UInt")]
+    [InlineData("10i", "Int")]
+    [InlineData("12.2f", "Float32")]
+    [InlineData("60.1d", "Float64")]
+    public void A_suffixed_literal_infers_its_exact_suffix_type_with_no_ambient_context(string literal, string expectedTypeName)
+    {
+        var (unit, _, checker, diagnostics) = Setup($"function f() {{ return {literal}; }}");
+        var functionType = CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+        Assert.Equal(expectedTypeName, functionType.ReturnType.DisplayName);
+    }
+
+    [Fact]
+    public void A_suffixed_literal_overrides_the_ambient_expected_type_rather_than_taking_it_on()
+    {
+        // Contextual typing (the un-suffixed case) would make this literal Int8 to match the
+        // annotation; an explicit suffix names its own type outright instead, so this is exactly as
+        // much a mismatch as assigning a real, already-Int32-typed expression would be.
+        var (unit, _, checker, diagnostics) = Setup("function f() { let x: Int8 = 5i32; }");
+        CheckFunction(checker, unit);
+
+        Assert.True(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void A_suffixed_literal_matching_its_annotations_exact_type_is_not_a_diagnostic()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f() { let x: UInt8 = 5u8; }");
+        CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Hex_and_binary_literals_infer_Int_without_context_same_as_a_decimal_whole_number()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f() { return 0xFF; }");
+        var functionType = CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+        Assert.Same(KokosPrimitiveType.Int, functionType.ReturnType);
+    }
+
+    [Fact]
+    public void Underscored_literal_widens_into_a_sized_annotation_same_as_a_plain_one()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f() { let x: Int32 = 1_000_000; }");
+        CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
     [Fact]
     public void Unknown_identifier_is_a_diagnostic()
     {

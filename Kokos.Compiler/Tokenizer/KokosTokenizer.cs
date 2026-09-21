@@ -45,6 +45,14 @@ public sealed class KokosTokenizer
     private readonly string _source;
     private int _pos;
 
+    /// <summary>
+    /// Set by <see cref="ScanDecimalNumber"/> right before it returns, read (and reset) by
+    /// <see cref="Tokenize"/> immediately after — a small side-channel so a number literal's explicit
+    /// type suffix reaches the produced <see cref="KokosToken.NumericSuffix"/> without widening
+    /// <see cref="ScanCoreToken"/>'s return shape (shared by every other kind of token) just for this.
+    /// </summary>
+    private string? _pendingNumericSuffix;
+
     public KokosDiagnosticBag Diagnostics { get; } = new();
 
     public KokosTokenizer(string source)
@@ -60,11 +68,12 @@ public sealed class KokosTokenizer
         while (true)
         {
             var start = _pos;
+            _pendingNumericSuffix = null;
             var (kind, text, value) = ScanCoreToken();
             var span = new TextSpan(start, _pos - start);
             var trailing = ScanTrivia(stopAtNewLine: true);
 
-            tokens.Add(new KokosToken(kind, text, span, leading, trailing, value));
+            tokens.Add(new KokosToken(kind, text, span, leading, trailing, value, numericSuffix: _pendingNumericSuffix));
             leading = ScanTrivia(stopAtNewLine: false);
 
             if (kind == TokenKind.EndOfFile)
@@ -84,7 +93,8 @@ public sealed class KokosTokenizer
                 [.. eof.LeadingTrivia, .. leading],
                 eof.TrailingTrivia,
                 eof.Value,
-                eof.IsMissing);
+                eof.IsMissing,
+                eof.NumericSuffix);
         }
 
         return tokens;
@@ -185,26 +195,127 @@ public sealed class KokosTokenizer
         return (kind, text, null);
     }
 
+    /// <summary>
+    /// Every numeric-type suffix a decimal literal can carry (<c>1u8</c>, <c>10i</c>, <c>12.2f</c>,
+    /// ...) — see <see cref="ScanNumericSuffix"/>. Kept as raw strings here (not
+    /// <c>Semantics.KokosPrimitiveKind</c>) since the tokenizer never depends on the semantic layer;
+    /// <see cref="Semantics.KokosTypeChecker.VisitLiteralNumber"/> is what maps this text to a type.
+    /// </summary>
+    private static readonly HashSet<string> NumericSuffixes = new()
+    {
+        "i8", "i16", "i32", "i64", "i",
+        "u8", "u16", "u32", "u64", "u",
+        "f", "d",
+    };
+
     private (TokenKind, string, object?) ScanNumber(int start)
     {
-        while (char.IsDigit(Current))
+        if (Current == '0' && Peek(1) is 'x' or 'X')
+            return ScanRadixNumber(start, radix: 16, isDigit: char.IsAsciiHexDigit);
+
+        if (Current == '0' && Peek(1) is 'b' or 'B')
+            return ScanRadixNumber(start, radix: 2, isDigit: c => c is '0' or '1');
+
+        return ScanDecimalNumber(start);
+    }
+
+    /// <summary>
+    /// Hex (<c>0x...</c>)/binary (<c>0b...</c>) integer literals — always whole numbers, so unlike a
+    /// decimal literal there's no fractional form and (to avoid ambiguity with hex digits a-f, which
+    /// would collide with the <c>f</c> suffix) no type suffix either. An underscore is allowed
+    /// anywhere among the digits and simply skipped, per spec.
+    /// </summary>
+    private (TokenKind, string, object?) ScanRadixNumber(int start, int radix, Func<char, bool> isDigit)
+    {
+        _pos += 2; // the "0x"/"0b" (or upper-case) prefix
+        var digitsStart = _pos;
+        while (isDigit(Current) || Current == '_')
             _pos++;
+
+        var text = _source[start.._pos];
+        var digits = _source[digitsStart.._pos].Replace("_", "");
+
+        if (digits.Length == 0)
+        {
+            Diagnostics.ReportError(new TextSpan(start, _pos - start), $"'{text}' has no digits after its radix prefix.");
+            return (TokenKind.NumberLiteral, text, 0L);
+        }
+
+        var value = unchecked((long)Convert.ToUInt64(digits, radix));
+        return (TokenKind.NumberLiteral, text, value);
+    }
+
+    private (TokenKind, string, object?) ScanDecimalNumber(int start)
+    {
+        ScanDigitsWithUnderscores();
 
         var isFloating = false;
         if (Current == '.' && char.IsDigit(Peek(1)))
         {
             isFloating = true;
             _pos++;
+            ScanDigitsWithUnderscores();
+        }
+
+        var digitsEnd = _pos;
+        var suffix = ScanNumericSuffix();
+
+        if (suffix is "f" or "d")
+        {
+            isFloating = true;
+        }
+        else if (suffix is not null && isFloating)
+        {
+            Diagnostics.ReportError(new TextSpan(start, digitsEnd - start),
+                $"'{suffix}' is an integer suffix and can't be applied to a fractional literal.");
+        }
+
+        var text = _source[start.._pos];
+        var digitsText = _source[start..digitsEnd].Replace("_", "");
+        object numericValue = isFloating
+            ? double.Parse(digitsText, CultureInfo.InvariantCulture)
+            : (object)long.Parse(digitsText, CultureInfo.InvariantCulture);
+
+        _pendingNumericSuffix = suffix;
+        return (TokenKind.NumberLiteral, text, numericValue);
+    }
+
+    /// <summary>Consumes a run of decimal digits, allowing (and, per spec, simply skipping) an underscore anywhere within it.</summary>
+    private void ScanDigitsWithUnderscores()
+    {
+        while (char.IsDigit(Current) || Current == '_')
+            _pos++;
+    }
+
+    /// <summary>
+    /// An explicit numeric-type suffix directly after a decimal literal's digits — one of
+    /// <see cref="NumericSuffixes"/>. A leading letter that isn't actually followed by a recognized
+    /// suffix (e.g. stray identifier characters glued onto a literal) is left alone rather than
+    /// swallowed or diagnosed here — the position is restored and it tokenizes as whatever it actually
+    /// is, which reliably surfaces as a clear syntax error one token later without this needing to
+    /// guess at intent.
+    /// </summary>
+    private string? ScanNumericSuffix()
+    {
+        if (Current is not ('u' or 'i' or 'f' or 'd'))
+            return null;
+
+        var start = _pos;
+        var letter = Current;
+        _pos++;
+
+        if (letter is 'u' or 'i')
+        {
             while (char.IsDigit(Current))
                 _pos++;
         }
 
-        var text = _source[start.._pos];
-        object value = isFloating
-            ? double.Parse(text, CultureInfo.InvariantCulture)
-            : (object)long.Parse(text, CultureInfo.InvariantCulture);
+        var suffixText = _source[start.._pos];
+        if (NumericSuffixes.Contains(suffixText))
+            return suffixText;
 
-        return (TokenKind.NumberLiteral, text, value);
+        _pos = start;
+        return null;
     }
 
     private (TokenKind, string, object?) ScanString(int start)

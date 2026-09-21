@@ -904,8 +904,32 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         }
     }
 
+    /// <summary>Maps a numeric literal's raw suffix text (see <see cref="KokosLiteralNumberNode.Suffix"/>) to its concrete type — kept in sync with the tokenizer's own recognized suffix set.</summary>
+    private static readonly IReadOnlyDictionary<string, KokosPrimitiveType> NumericLiteralSuffixTypes = new Dictionary<string, KokosPrimitiveType>
+    {
+        ["i8"] = KokosPrimitiveType.Int8,
+        ["i16"] = KokosPrimitiveType.Int16,
+        ["i32"] = KokosPrimitiveType.Int32,
+        ["i64"] = KokosPrimitiveType.Int64,
+        ["i"] = KokosPrimitiveType.Int,
+        ["u8"] = KokosPrimitiveType.UInt8,
+        ["u16"] = KokosPrimitiveType.UInt16,
+        ["u32"] = KokosPrimitiveType.UInt32,
+        ["u64"] = KokosPrimitiveType.UInt64,
+        ["u"] = KokosPrimitiveType.UInt,
+        ["f"] = KokosPrimitiveType.Float32,
+        ["d"] = KokosPrimitiveType.Float64,
+    };
+
     public KokosType VisitLiteralNumber(KokosLiteralNumberNode node)
     {
+        // An explicit suffix (`1u8`, `12.2f`, ...) names a concrete type outright — same as any other
+        // already-typed expression, it's simply returned here and left to the caller's ordinary
+        // assignability check to catch a mismatch against whatever context it's used in (e.g.
+        // `let x: Int8 = 5u32;` is exactly as much a diagnostic as passing a real Int32 would be).
+        if (node.Suffix is not null && NumericLiteralSuffixTypes.TryGetValue(node.Suffix, out var suffixType))
+            return suffixType;
+
         var isFloatingLiteral = node.Value is double;
 
         // Contextual typing: `let x: Int8 = 5;` types the literal as Int8 directly rather than

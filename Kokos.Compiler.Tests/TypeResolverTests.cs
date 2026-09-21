@@ -321,6 +321,43 @@ public class TypeResolverTests
         Assert.Equal(4, fixedLength.Length);
     }
 
+    [Theory]
+    [InlineData("[Int # 1_000]", 1000L)]
+    [InlineData("[Int # 0xFF]", 255L)]
+    [InlineData("[Int # 0b1010]", 10L)]
+    public void A_fixed_length_arrays_size_understands_underscores_hex_and_binary_same_as_any_other_literal(string typeText, long expectedLength)
+    {
+        var (unit, _, resolver, diagnostics) = Setup($"function f(a: {typeText}): Int {{ return 0; }}");
+        var function = (KokosFunctionNode)unit.Members[0];
+
+        var arrayType = (KokosArrayType)resolver.Resolve(function.Parameters.Items[0].Type);
+
+        Assert.False(diagnostics.HasErrors);
+        Assert.Equal(expectedLength, arrayType.Length);
+    }
+
+    [Fact]
+    public void An_enum_discriminator_understands_hex_and_underscored_literals()
+    {
+        const string source = """
+            enum Flags {
+                None = 0x00,
+                Read = 0x01,
+                Write = 0x02,
+                All = 1_000
+            }
+            """;
+
+        var (unit, _, resolver, diagnostics) = Setup(source);
+        var enumType = (KokosEnumType)resolver.ResolveEnum((KokosEnumDeclNode)unit.Members[0]);
+
+        Assert.False(diagnostics.HasErrors);
+        Assert.Equal(0, enumType.Variants[0].Discriminator);
+        Assert.Equal(1, enumType.Variants[1].Discriminator);
+        Assert.Equal(2, enumType.Variants[2].Discriminator);
+        Assert.Equal(1000, enumType.Variants[3].Discriminator);
+    }
+
     [Fact]
     public void Optional_over_a_pointer_shaped_type_reuses_the_inner_pointer()
     {

@@ -508,4 +508,30 @@ public class FormatterTests
             """,
             KokosFormatter.Format(unit));
     }
+
+    [Fact]
+    public void Formats_extended_numeric_literals_exactly_as_written()
+    {
+        // The formatter prints a numeric literal from its original token spelling rather than
+        // reformatting node.Value (see VisitLiteralNumber) — hex/binary/underscores/suffixes should
+        // all just round-trip verbatim.
+        var unit = KokosParser.Parse(
+            "function f(): Int { let a = 0xFFFFFF; let b = 0b1110_1111; let c = 100_000; let d = 1u8; let e = 12.2f; return a; }",
+            out var diagnostics);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+
+        Assert.Equal(
+            """
+            function f(): Int {
+                let a = 0xFFFFFF;
+                let b = 0b1110_1111;
+                let c = 100_000;
+                let d = 1u8;
+                let e = 12.2f;
+                return a;
+            }
+
+            """,
+            KokosFormatter.Format(unit));
+    }
 }

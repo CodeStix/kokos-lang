@@ -153,4 +153,100 @@ public class TokenizerTests
         var tokens = new KokosTokenizer(source).Tokenize();
         Assert.Equal(source, string.Concat(tokens.Select(t => t.GetFullText())));
     }
+
+    // --- Extended numeric literals: hex/binary, underscores, type suffixes ------------------------
+
+    [Theory]
+    [InlineData("0xFFFFFF", 16777215L)]
+    [InlineData("0xff", 255L)]
+    [InlineData("0b100000000", 256L)]
+    [InlineData("0b1110_1111", 239L)]
+    [InlineData("100_000", 100000L)]
+    [InlineData("1_0_0", 100L)]
+    public void Decodes_hex_binary_and_underscored_integer_literals(string text, long expected)
+    {
+        var tokens = new KokosTokenizer(text).Tokenize();
+
+        Assert.Equal(TokenKind.NumberLiteral, tokens[0].Kind);
+        Assert.Equal(text, tokens[0].Text);
+        Assert.Equal(expected, (long)tokens[0].Value!);
+        Assert.Null(tokens[0].NumericSuffix);
+    }
+
+    [Theory]
+    [InlineData("1u8", 1L, "u8")]
+    [InlineData("10i32", 10L, "i32")]
+    [InlineData("50000u64", 50000L, "u64")]
+    [InlineData("1u", 1L, "u")]
+    [InlineData("10i", 10L, "i")]
+    public void Decodes_integer_literal_suffixes(string text, long expectedValue, string expectedSuffix)
+    {
+        var tokens = new KokosTokenizer(text).Tokenize();
+
+        Assert.Equal(TokenKind.NumberLiteral, tokens[0].Kind);
+        Assert.Equal(expectedValue, (long)tokens[0].Value!);
+        Assert.Equal(expectedSuffix, tokens[0].NumericSuffix);
+    }
+
+    [Theory]
+    [InlineData("12.2f", "f")]
+    [InlineData("60.1d", "d")]
+    [InlineData("5f", "f")]
+    [InlineData("5d", "d")]
+    public void Decodes_floating_point_literal_suffixes(string text, string expectedSuffix)
+    {
+        var tokens = new KokosTokenizer(text).Tokenize();
+
+        Assert.Equal(TokenKind.NumberLiteral, tokens[0].Kind);
+        Assert.IsType<double>(tokens[0].Value);
+        Assert.Equal(expectedSuffix, tokens[0].NumericSuffix);
+    }
+
+    [Fact]
+    public void A_hex_literal_does_not_confuse_its_own_f_digit_with_a_suffix()
+    {
+        // 'f' is a valid hex digit, so '0xAF' must decode as the single value 175, not as '0xA' with
+        // a stray Float32 suffix — hex/binary literals don't support suffixes at all (see ScanNumber).
+        var tokens = new KokosTokenizer("0xAF").Tokenize();
+
+        Assert.Equal(TokenKind.NumberLiteral, tokens[0].Kind);
+        Assert.Equal("0xAF", tokens[0].Text);
+        Assert.Equal(175L, (long)tokens[0].Value!);
+        Assert.Null(tokens[0].NumericSuffix);
+    }
+
+    [Fact]
+    public void An_integer_suffix_on_a_fractional_literal_is_a_diagnostic()
+    {
+        var tokenizer = new KokosTokenizer("5.5i");
+        tokenizer.Tokenize();
+        Assert.True(tokenizer.Diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void An_unrecognized_trailing_letter_is_not_treated_as_a_suffix()
+    {
+        // 'x' isn't a recognized suffix start — the number token stops at '5', and 'x' tokenizes
+        // separately (a parser-level concern from there, not the tokenizer's).
+        var tokens = new KokosTokenizer("5x").Tokenize();
+
+        Assert.Equal(
+            [TokenKind.NumberLiteral, TokenKind.Identifier, TokenKind.EndOfFile],
+            tokens.Select(t => t.Kind));
+        Assert.Equal("5", tokens[0].Text);
+        Assert.Equal("x", tokens[1].Text);
+    }
+
+    [Fact]
+    public void An_unrecognized_integer_width_is_not_treated_as_a_suffix()
+    {
+        // 'i7' isn't a recognized width — back off entirely rather than swallowing it as a bogus suffix.
+        var tokens = new KokosTokenizer("5i7").Tokenize();
+
+        Assert.Equal(
+            [TokenKind.NumberLiteral, TokenKind.Identifier, TokenKind.EndOfFile],
+            tokens.Select(t => t.Kind));
+        Assert.Equal("5", tokens[0].Text);
+        Assert.Equal("i7", tokens[1].Text);
+    }
 }

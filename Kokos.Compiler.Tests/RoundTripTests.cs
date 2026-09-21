@@ -151,6 +151,20 @@ public class RoundTripTests
 
         // Phase E: free() for manual handles.
         yield return ["function f(m: manual Person) { free(m); }"];
+
+        // Extended numeric literals: hex/binary, underscores, and type suffixes.
+        yield return ["""
+            function numericLiterals(): Int {
+                let a = 0xFFFFFF;
+                let b = 0b1110_1111;
+                let c = 100_000;
+                let d = 1u8;
+                let e = 10i32;
+                let g = 12.2f;
+                let h = 60.1d;
+                return a;
+            }
+            """];
     }
 
     [Theory]

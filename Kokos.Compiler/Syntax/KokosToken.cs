@@ -16,7 +16,8 @@ public sealed class KokosToken : KokosSyntaxElement
         IReadOnlyList<KokosTrivia> leadingTrivia,
         IReadOnlyList<KokosTrivia> trailingTrivia,
         object? value = null,
-        bool isMissing = false)
+        bool isMissing = false,
+        string? numericSuffix = null)
     {
         Kind = kind;
         Text = text;
@@ -25,6 +26,7 @@ public sealed class KokosToken : KokosSyntaxElement
         TrailingTrivia = trailingTrivia;
         Value = value;
         IsMissing = isMissing;
+        NumericSuffix = numericSuffix;
     }
 
     public TokenKind Kind { get; }
@@ -38,6 +40,9 @@ public sealed class KokosToken : KokosSyntaxElement
 
     /// <summary>Decoded literal value (e.g. unescaped string, parsed number). Null for non-literals.</summary>
     public object? Value { get; }
+
+    /// <summary>A numeric literal's explicit type suffix text (e.g. <c>"u8"</c>, <c>"i"</c>, <c>"f"</c>), or null if it has none or this isn't a <see cref="TokenKind.NumberLiteral"/> at all.</summary>
+    public string? NumericSuffix { get; }
 
     /// <summary>True if this token was synthesized by the parser during error recovery (empty text).</summary>
     public bool IsMissing { get; }

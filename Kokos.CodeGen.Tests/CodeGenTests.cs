@@ -32,6 +32,8 @@ public delegate int UnaryIntFunc(int a);
 // bits are otherwise unspecified. Reading a 'byte' instead only ever looks at AL, which is exactly
 // what LLVM actually writes 0/1 into.
 public delegate byte NullaryByteFunc();
+public delegate float NullaryFloatFunc();
+public delegate double NullaryDoubleFunc();
 
 public class CodeGenTests
 {
@@ -1321,5 +1323,70 @@ public class CodeGenTests
             libraryPaths: [missingPath]));
 
         Assert.Contains(missingPath, ex.Message);
+    }
+
+    // --- Extended numeric literals -------------------------------------------------------------------
+
+    [Fact]
+    public void Hex_binary_and_underscored_literals_evaluate_to_the_expected_value()
+    {
+        using var jit = GenerateAndJit(
+            """
+            export function main(): Int {
+                return 0xFFFFFF + 0b1110_1111 + 100_000;
+            }
+            """);
+
+        var main = jit.GetFunction<NullaryLongFunc>("main");
+
+        Assert.Equal(16777215 + 239 + 100000, main());
+    }
+
+    [Fact]
+    public void A_suffixed_literal_produces_a_value_of_its_exact_width_and_sign()
+    {
+        // 200 doesn't fit in a signed Int8 but does fit in UInt8 — if the suffix were ignored and
+        // this literal were instead contextually inferred as the default 'Int', 200 would still be
+        // fine, so this specifically exercises that 'u8' really does drive an 8-bit unsigned store.
+        using var jit = GenerateAndJit(
+            """
+            export function main(): UInt8 {
+                return 200u8;
+            }
+            """);
+
+        var main = jit.GetFunction<NullaryByteFunc>("main");
+
+        Assert.Equal(200, main());
+    }
+
+    [Fact]
+    public void A_float32_suffixed_literal_round_trips_through_arithmetic()
+    {
+        using var jit = GenerateAndJit(
+            """
+            export function main(): Float32 {
+                return 12.2f + 1.0f;
+            }
+            """);
+
+        var main = jit.GetFunction<NullaryFloatFunc>("main");
+
+        Assert.Equal(13.2f, main(), precision: 5);
+    }
+
+    [Fact]
+    public void A_float64_suffixed_literal_round_trips_through_arithmetic()
+    {
+        using var jit = GenerateAndJit(
+            """
+            export function main(): Float64 {
+                return 60.1d;
+            }
+            """);
+
+        var main = jit.GetFunction<NullaryDoubleFunc>("main");
+
+        Assert.Equal(60.1, main(), precision: 10);
     }
 }

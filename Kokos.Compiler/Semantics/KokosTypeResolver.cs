@@ -149,7 +149,7 @@ public sealed class KokosTypeResolver : IKokosVisitor<KokosType>
             var payloadType = variantNode.PayloadType is null ? null : Resolve(variantNode.PayloadType);
 
             var discriminator = nextDiscriminator;
-            if (variantNode.DiscriminatorToken is not null && long.TryParse(variantNode.DiscriminatorToken.Text, out var parsed))
+            if (variantNode.DiscriminatorToken is not null && TryParseIntegerLiteralText(variantNode.DiscriminatorToken.Text, out var parsed))
                 discriminator = parsed;
 
             variants.Add(new KokosEnumVariant(variantNode.Name, payloadType, discriminator));
@@ -238,7 +238,7 @@ public sealed class KokosTypeResolver : IKokosVisitor<KokosType>
 
     public KokosType VisitFixedLengthArrayType(KokosFixedLengthArrayTypeNode node)
     {
-        var length = long.TryParse(node.SizeToken.Text, out var n) ? n : 0;
+        var length = TryParseIntegerLiteralText(node.SizeToken.Text, out var parsed) ? parsed : 0;
         var elementType = Resolve(node.ElementType);
 
         if (node.ValueKeyword is not null && elementType is not (KokosPrimitiveType or KokosBoolType))
@@ -249,6 +249,31 @@ public sealed class KokosTypeResolver : IKokosVisitor<KokosType>
         }
 
         return Intern(new KokosArrayType(KokosArrayKind.FixedLength, elementType, length, node.ValueKeyword is not null));
+    }
+
+    /// <summary>
+    /// Parses a raw <see cref="TokenKind.NumberLiteral"/> token's <em>text</em> as a plain compile-time
+    /// integer — used at the two spots (an enum discriminator, a fixed-length array's <c>N</c>) that
+    /// consume a number literal token directly rather than through <see cref="KokosLiteralNumberNode"/>,
+    /// so they still need to understand the tokenizer's underscore/hex/binary literal forms themselves.
+    /// A numeric-type suffix (<c>u8</c>, <c>f</c>, ...) isn't valid in either position and simply fails
+    /// to parse here, same as any other malformed text — neither call site treats that as fatal.
+    /// </summary>
+    private static bool TryParseIntegerLiteralText(string text, out long value)
+    {
+        if (text.Length > 2 && text[0] == '0' && text[1] is 'x' or 'X')
+        {
+            value = unchecked((long)Convert.ToUInt64(text[2..].Replace("_", ""), 16));
+            return true;
+        }
+
+        if (text.Length > 2 && text[0] == '0' && text[1] is 'b' or 'B')
+        {
+            value = unchecked((long)Convert.ToUInt64(text[2..].Replace("_", ""), 2));
+            return true;
+        }
+
+        return long.TryParse(text.Replace("_", ""), out value);
     }
 
     public KokosType VisitOptionalType(KokosOptionalTypeNode node) =>
