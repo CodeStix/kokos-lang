@@ -9,6 +9,8 @@ namespace Kokos.Compiler.Syntax.Nodes;
 public interface IKokosVisitor<out T>
 {
     T VisitCompilationUnit(KokosCompilationUnitNode node);
+    T VisitModuleDecl(KokosModuleDeclNode node);
+    T VisitImportDirective(KokosImportDirectiveNode node);
     T VisitFunction(KokosFunctionNode node);
     T VisitStaticVarDecl(KokosStaticVarDeclNode node);
     T VisitParameter(KokosParameterNode node);

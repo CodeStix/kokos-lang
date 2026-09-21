@@ -262,10 +262,21 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
                 if (declNode.Initializer is null)
                     continue;
 
-                var (pointer, _, ownership, kokosType) = _staticVariables[declNode.Name];
-                var value = declNode.Initializer.Accept(this);
-                var converted = ConvertOwnership(value, GetOwnership(declNode.Initializer), ownership, _checker.ExpressionTypes[declNode.Initializer], kokosType);
-                _builder.BuildStore(converted, pointer);
+                // Same reasoning as DefineFunctionBody's own context swap: this static's initializer
+                // expression must resolve any name it references under *its own* file's imports.
+                var outerContext = _table.CurrentContext;
+                _table.CurrentContext = _table.ContextOf(declNode);
+                try
+                {
+                    var (pointer, _, ownership, kokosType) = _staticVariables[declNode.Name];
+                    var value = declNode.Initializer.Accept(this);
+                    var converted = ConvertOwnership(value, GetOwnership(declNode.Initializer), ownership, _checker.ExpressionTypes[declNode.Initializer], kokosType);
+                    _builder.BuildStore(converted, pointer);
+                }
+                finally
+                {
+                    _table.CurrentContext = outerContext;
+                }
             }
 
             BuildRetVoid();
@@ -305,9 +316,20 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         var outerScope = _scope;
         var outerFunction = _currentFunction;
         var outerFunctionType = _currentFunctionType;
+        var outerContext = _table.CurrentContext;
         _scope = [];
         _currentFunction = function;
         _currentFunctionType = functionType;
+
+        // A call/construction site inside this body resolves the callee's/struct's name under *this
+        // function's own* namespace visibility (its own 'module'/'import's) — not whichever context
+        // happened to be active when DefineFunctionBody was called for the *previous* function (two-pass
+        // declare-then-define means bodies are generated in an order that has nothing to do with which
+        // file each one came from). Mirrors KokosTypeChecker/KokosTypeResolver's own context-swap
+        // exactly, just simpler: codegen never re-enters a function's body lazily, so there's no
+        // memoization gate here the way GetFunctionType/ResolveStruct need — DefineFunctionBody is
+        // already the one place every function body is generated, once, so swapping here covers it all.
+        _table.CurrentContext = _table.ContextOf(node);
 
         // Every static variable is visible from every function — seeded in before parameters (which
         // may legitimately shadow one) so VisitIdentifier/VisitAssignment/etc. address the real global
@@ -351,6 +373,7 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
             _scope = outerScope;
             _currentFunction = outerFunction;
             _currentFunctionType = outerFunctionType;
+            _table.CurrentContext = outerContext;
         }
     }
 
@@ -1541,6 +1564,8 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     public LLVMValueRef VisitStructDecl(KokosStructDeclNode node) => throw NotYet(nameof(KokosStructDeclNode), "declarations aren't codegen'd directly, only referenced through resolved types");
     public LLVMValueRef VisitStaticVarDecl(KokosStaticVarDeclNode node) => throw NotYet(nameof(KokosStaticVarDeclNode), "declarations aren't codegen'd directly — see DeclareStaticVariables");
     public LLVMValueRef VisitField(KokosFieldNode node) => throw NotYet(nameof(KokosFieldNode), "has no standalone codegen; only meaningful as part of resolving its struct/tuple");
+    public LLVMValueRef VisitModuleDecl(KokosModuleDeclNode node) => throw NotYet(nameof(KokosModuleDeclNode), "purely namespace bookkeeping, resolved before codegen ever runs — see KokosDeclarationTable");
+    public LLVMValueRef VisitImportDirective(KokosImportDirectiveNode node) => throw NotYet(nameof(KokosImportDirectiveNode), "purely namespace bookkeeping, resolved before codegen ever runs — see KokosDeclarationTable");
     /// <summary>
     /// A string literal is a compile-time-constant `unowned [Int8]` fat pointer — `{ i64 gen=0,
     /// i64 length, HeapBlock* ptr }` pointing at a global exactly shaped like a real

@@ -40,6 +40,7 @@ public sealed class KokosTokenizer
         ["free"] = TokenKind.FreeKeyword,
         ["import"] = TokenKind.ImportKeyword,
         ["export"] = TokenKind.ExportKeyword,
+        ["module"] = TokenKind.ModuleKeyword,
     };
 
     private readonly string _source;

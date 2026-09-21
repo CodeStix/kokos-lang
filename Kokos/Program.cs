@@ -1,6 +1,8 @@
 using Kokos.CodeGen;
+using Kokos.Compiler.Diagnostics;
 using Kokos.Compiler.Parsing;
 using Kokos.Compiler.Semantics;
+using Kokos.Compiler.Syntax.Nodes;
 
 namespace Kokos;
 
@@ -44,20 +46,40 @@ internal class Program
             }
         }
 
-        if (path is null)
-        {
-            Console.Error.WriteLine(
-                "Usage: kokos <file.kokos> [-O0|-O1|-O2|-O3|--optimize] [--emit-object <file.obj>] [--library <path> ...]");
+        // No positional argument at all means "compile the current directory" — the common case of
+        // running the compiler from inside a project folder with no further arguments, per multi-file
+        // compilation's own framing ("when the compiler is ran in a specific folder..."). An explicit
+        // argument can still name either a single '.kokos' file (the original, single-file behavior)
+        // or a folder (every '.kokos' file found anywhere under it, recursively, compiled together
+        // into one LLVM module — see BuildProject below).
+        path ??= ".";
+
+        if (!TryBuildProject(path, out var project, out var moduleName))
             return 1;
+
+        var diagnostics = new KokosDiagnosticBag();
+        var units = new List<KokosCompilationUnitNode>();
+        foreach (var (relativePath, source) in project)
+        {
+            var fileUnit = KokosParser.Parse(source, relativePath, out var fileDiagnostics);
+            diagnostics.AddRange(fileDiagnostics, relativePath);
+            units.Add(fileUnit);
         }
 
-        var source = File.ReadAllText(path);
-
-        var unit = KokosParser.Parse(source, out var diagnostics);
-
-        var table = new KokosDeclarationTable(unit, diagnostics);
+        var table = new KokosDeclarationTable(units, diagnostics);
         var resolver = new KokosTypeResolver(table, diagnostics);
         var checker = new KokosTypeChecker(table, resolver, diagnostics);
+
+        // Every file's members merged into one synthetic unit — safe, since a KokosNode has no parent
+        // back-pointer (see KokosNode.AddChild): a member can sit as a child of both its own original
+        // per-file unit and this merged one with no corruption. KokosTypeChecker/KokosCodeGenerator's
+        // own VisitCompilationUnit already needed no other change to make this "just work" — every
+        // lazy, cross-file-reachable resolution point (GetFunctionType, GetStaticVariableBinding,
+        // KokosTypeResolver.ResolveStruct/ResolveNamedDeclaration) swaps KokosDeclarationTable's active
+        // namespace-visibility context to whichever file *that specific declaration* came from, so name
+        // resolution and diagnostics are still correct per-declaration regardless of how the units were
+        // combined for the top-level traversal.
+        var unit = new KokosCompilationUnitNode(units.SelectMany(u => u.Members).ToList(), units[^1].EndOfFileToken);
         checker.VisitCompilationUnit(unit);
 
         if (diagnostics.Any())
@@ -107,7 +129,7 @@ internal class Program
 
         try
         {
-            var generator = new KokosCodeGenerator(table, checker, Path.GetFileNameWithoutExtension(path));
+            var generator = new KokosCodeGenerator(table, checker, moduleName);
             var module = generator.Generate(unit);
 
             if (optimizationLevel != KokosOptimizationLevel.None)
@@ -172,6 +194,51 @@ internal class Program
 
         value = args[++i];
         return true;
+    }
+
+    /// <summary>
+    /// Resolves <paramref name="path"/> into the source files to compile together, each paired with a
+    /// path relative to <paramref name="path"/> itself (used purely for diagnostics — see
+    /// <see cref="KokosCompilationUnitNode.SourceFile"/>). A directory contributes every <c>.kokos</c>
+    /// file found anywhere under it, recursively, in a stable (ordinal-sorted) order — every nested
+    /// file compiles into the same LLVM module regardless of which subfolder it's in, per multi-file
+    /// compilation's whole point. A single file — the original, still fully supported behavior — just
+    /// contributes itself. <paramref name="moduleName"/> becomes the resulting LLVM module's name: the
+    /// directory's own name, or the file's name without its extension.
+    /// </summary>
+    private static bool TryBuildProject(string path, out List<(string RelativePath, string Source)> files, out string moduleName)
+    {
+        files = [];
+        moduleName = "";
+
+        if (Directory.Exists(path))
+        {
+            var filePaths = Directory.EnumerateFiles(path, "*.kokos", SearchOption.AllDirectories)
+                .OrderBy(p => p, StringComparer.Ordinal)
+                .ToList();
+
+            if (filePaths.Count == 0)
+            {
+                Console.Error.WriteLine($"No '.kokos' files found under '{Path.GetFullPath(path)}'.");
+                return false;
+            }
+
+            foreach (var filePath in filePaths)
+                files.Add((Path.GetRelativePath(path, filePath), File.ReadAllText(filePath)));
+
+            moduleName = new DirectoryInfo(Path.GetFullPath(path)).Name;
+            return true;
+        }
+
+        if (File.Exists(path))
+        {
+            files.Add((Path.GetFileName(path), File.ReadAllText(path)));
+            moduleName = Path.GetFileNameWithoutExtension(path);
+            return true;
+        }
+
+        Console.Error.WriteLine($"'{path}' does not exist.");
+        return false;
     }
 
     private static void RunMain(KokosJit jit, KokosType returnType)

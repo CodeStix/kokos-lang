@@ -182,6 +182,33 @@ public class RoundTripTests
         yield return ["function f(): (status: UInt64, flag: Bool) { return (status: 100, flag: true); }"];
         yield return ["function f() { let t = (1, 2, 3,); }"];
         yield return ["function f() { let t = (x: 1, y: 2); }"];
+
+        // Multi-file compilation: 'module' declarations and 'import' directives.
+        yield return ["""
+            module ThisIsMyNamespace.Hello;
+
+            function sayHello() {
+            }
+            """];
+        yield return ["""
+            import ThisIsMyNamespace.Hello;
+
+            function main() {
+                sayHello();
+            }
+            """];
+        yield return ["""
+            module A;
+            import B;
+            import C.D;
+
+            function f() {
+            }
+            """];
+        // 'import' still means the existing external-function declaration when followed by
+        // 'function'/'(' rather than a bare identifier — this must keep parsing exactly as before.
+        yield return ["import function puts(str: CString): Int;"];
+        yield return ["import(c) function puts(str: CString): Int;"];
     }
 
     [Theory]

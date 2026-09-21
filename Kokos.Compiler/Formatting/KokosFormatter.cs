@@ -46,6 +46,10 @@ public sealed class KokosFormatter : IKokosVisitor<string>
 
     public string VisitParameter(KokosParameterNode node) => $"{node.Name}: {node.Type.Accept(this)}";
 
+    public string VisitModuleDecl(KokosModuleDeclNode node) => $"module {node.DottedName};";
+
+    public string VisitImportDirective(KokosImportDirectiveNode node) => $"import {node.DottedName};";
+
     public string VisitStaticVarDecl(KokosStaticVarDeclNode node)
     {
         var initializer = node.Initializer is null ? "" : $" = {node.Initializer.Accept(this)}";

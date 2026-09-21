@@ -24,13 +24,22 @@ public sealed class KokosParser
         _diagnostics = diagnostics;
     }
 
-    public static KokosCompilationUnitNode Parse(string source, out KokosDiagnosticBag diagnostics)
+    public static KokosCompilationUnitNode Parse(string source, out KokosDiagnosticBag diagnostics) =>
+        Parse(source, sourceFile: null, out diagnostics);
+
+    /// <summary>
+    /// <paramref name="sourceFile"/> is purely descriptive (see <see cref="KokosCompilationUnitNode.SourceFile"/>)
+    /// — a caller compiling multiple files together passes each one's path so later diagnostics/namespace
+    /// bookkeeping can tell units apart; single-file callers (including every existing use of the
+    /// 2-argument overload) can safely leave it null.
+    /// </summary>
+    public static KokosCompilationUnitNode Parse(string source, string? sourceFile, out KokosDiagnosticBag diagnostics)
     {
         var tokenizer = new KokosTokenizer(source);
         var tokens = tokenizer.Tokenize();
 
         var parser = new KokosParser(tokens, tokenizer.Diagnostics);
-        var unit = parser.ParseCompilationUnit();
+        var unit = parser.ParseCompilationUnit(sourceFile);
 
         diagnostics = tokenizer.Diagnostics;
         return unit;
@@ -59,29 +68,93 @@ public sealed class KokosParser
 
     // --- Top level -------------------------------------------------------
 
-    private KokosCompilationUnitNode ParseCompilationUnit()
+    private KokosCompilationUnitNode ParseCompilationUnit(string? sourceFile)
     {
         var members = new List<KokosMemberNode>();
+        var sawNonDirectiveMember = false;
 
         while (Current.Kind != TokenKind.EndOfFile)
         {
             var before = _pos;
-            members.Add(ParseMember());
+            var member = ParseMember();
+            members.Add(member);
+
+            // 'module' is only meaningful as the very first thing in a file — reported here (rather
+            // than left for a later semantic pass) since it's a purely syntactic positioning rule, the
+            // same style as "a positional argument cannot follow a named argument" elsewhere in this
+            // parser. A stray later 'module' declaration is still recorded as a normal member (so
+            // GetFullText() keeps round-tripping and namespace bookkeeping has something to point the
+            // diagnostic at), just never treated as *the* file's module going forward — see
+            // KokosCompilationUnitNode.ModuleDecl, which always resolves to the first one regardless.
+            if (member is KokosModuleDeclNode moduleDecl && sawNonDirectiveMember)
+            {
+                _diagnostics.ReportError(moduleDecl.ModuleKeyword.Span,
+                    "A 'module' declaration must be the first thing in the file.");
+            }
+            else if (member is not (KokosModuleDeclNode or KokosImportDirectiveNode))
+            {
+                sawNonDirectiveMember = true;
+            }
+
             EnsureProgress(before);
         }
 
         var eof = Advance();
-        return new KokosCompilationUnitNode(members, eof);
+        return new KokosCompilationUnitNode(members, eof, sourceFile);
     }
 
-    private KokosMemberNode ParseMember() => Current.Kind switch
+    private KokosMemberNode ParseMember()
     {
-        TokenKind.TypeKeyword or TokenKind.OpaqueKeyword => ParseTypeAlias(),
-        TokenKind.EnumKeyword => ParseEnumDecl(),
-        TokenKind.StructKeyword or TokenKind.ValueKeyword => ParseStructDecl(),
-        TokenKind.StaticKeyword => ParseStaticVarDecl(),
-        _ => ParseFunctionDeclaration(),
-    };
+        if (Current.Kind == TokenKind.ModuleKeyword)
+            return ParseModuleDecl();
+
+        // Distinguishes a bare `import Foo.Bar;` namespace-import directive from `import function
+        // foo(...);`/`import(c) function foo(...);` (an external-function declaration) — both start
+        // with the same 'import' keyword, so the token right after it (an identifier starting a
+        // dotted path, vs. 'function'/'(') is what tells them apart.
+        if (Current.Kind == TokenKind.ImportKeyword && Peek(1).Kind == TokenKind.Identifier)
+            return ParseImportDirective();
+
+        return Current.Kind switch
+        {
+            TokenKind.TypeKeyword or TokenKind.OpaqueKeyword => ParseTypeAlias(),
+            TokenKind.EnumKeyword => ParseEnumDecl(),
+            TokenKind.StructKeyword or TokenKind.ValueKeyword => ParseStructDecl(),
+            TokenKind.StaticKeyword => ParseStaticVarDecl(),
+            _ => ParseFunctionDeclaration(),
+        };
+    }
+
+    private KokosModuleDeclNode ParseModuleDecl()
+    {
+        var moduleKeyword = Advance();
+        var (nameParts, dotTokens) = ParseDottedName();
+        var semicolon = Expect(TokenKind.Semicolon, "';'");
+        return new KokosModuleDeclNode(moduleKeyword, nameParts, dotTokens, semicolon);
+    }
+
+    private KokosImportDirectiveNode ParseImportDirective()
+    {
+        var importKeyword = Advance();
+        var (nameParts, dotTokens) = ParseDottedName();
+        var semicolon = Expect(TokenKind.Semicolon, "';'");
+        return new KokosImportDirectiveNode(importKeyword, nameParts, dotTokens, semicolon);
+    }
+
+    /// <summary>Parses <c>Identifier ('.' Identifier)*</c> — the dotted namespace path shared by <c>module</c> and <c>import</c> directives.</summary>
+    private (List<KokosToken> Parts, List<KokosToken> Dots) ParseDottedName()
+    {
+        var parts = new List<KokosToken> { Expect(TokenKind.Identifier, "a namespace name") };
+        var dots = new List<KokosToken>();
+
+        while (Current.Kind == TokenKind.Dot)
+        {
+            dots.Add(Advance());
+            parts.Add(Expect(TokenKind.Identifier, "a namespace name"));
+        }
+
+        return (parts, dots);
+    }
 
     private KokosStaticVarDeclNode ParseStaticVarDecl()
     {

@@ -1,8 +1,10 @@
-﻿using System.Runtime.InteropServices;
+﻿using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
 using Kokos.Compiler.Diagnostics;
 using Kokos.Compiler.Parsing;
 using Kokos.Compiler.Semantics;
+using Kokos.Compiler.Syntax.Nodes;
 using Kokos.CodeGen;
 using LLVMSharp.Interop;
 using Xunit;
@@ -56,6 +58,33 @@ public class CodeGenTests
         KokosOptimizer.Optimize(module, optimizationLevel);
 
         return KokosJit.Create(module, generator.Context, libraryPaths);
+    }
+
+    /// <summary>
+    /// The multi-file counterpart of <see cref="GenerateAndJit"/>: each string in <paramref name="sources"/>
+    /// is its own "file" (own <see cref="KokosCompilationUnitNode"/>, own synthetic path), checked
+    /// together against one shared table exactly like <c>Kokos/Program.cs</c> does for a real folder of
+    /// <c>.kokos</c> files, then merged into a single LLVM module.
+    /// </summary>
+    private static KokosJit GenerateAndJitMultiFile(params string[] sources)
+    {
+        var diagnostics = new KokosDiagnosticBag();
+        var units = new List<KokosCompilationUnitNode>();
+        for (var i = 0; i < sources.Length; i++)
+            units.Add(KokosParser.Parse(sources[i], $"file{i}.kokos", out _));
+
+        var table = new KokosDeclarationTable(units, diagnostics);
+        var resolver = new KokosTypeResolver(table, diagnostics);
+        var checker = new KokosTypeChecker(table, resolver, diagnostics);
+
+        var unit = new KokosCompilationUnitNode(units.SelectMany(u => u.Members).ToList(), units[^1].EndOfFileToken);
+        checker.VisitCompilationUnit(unit);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+
+        var generator = new KokosCodeGenerator(table, checker, "test_module");
+        var module = generator.Generate(unit);
+
+        return KokosJit.Create(module, generator.Context, null);
     }
 
     /// <summary>The checked-in native fixture DLL's path — see Fixtures/native_fixture.c.</summary>
@@ -1553,6 +1582,80 @@ public class CodeGenTests
             module.Dispose();
             generator.Context.Dispose();
         }
+    }
+
+    // --- Multi-file compilation / namespaces -----------------------------------------------------
+
+    [Fact]
+    public void A_non_exported_function_in_one_file_is_callable_from_another_files_body()
+    {
+        // "even non-exported functions are available in other files inside the same module" — the
+        // reported requirement, verified end to end: both files compile into one LLVM module, and
+        // 'helper' (never 'export'-marked, so 'internal' LLVM linkage) is still directly callable from
+        // 'main' in the other file, since 'internal' only restricts visibility *outside* the module.
+        using var jit = GenerateAndJitMultiFile(
+            "function helper(): Int { return 41; }",
+            "export function main(): Int { return helper() + 1; }");
+
+        var main = jit.GetFunction<NullaryLongFunc>("main");
+
+        Assert.Equal(42, main());
+    }
+
+    [Fact]
+    public void A_namespaced_function_is_callable_only_from_a_file_that_imports_its_namespace()
+    {
+        // The reported repro's corrected ("import ThisIsMyNamespace.Hello;") variant, run end to end.
+        using var jit = GenerateAndJitMultiFile(
+            """
+            module ThisIsMyNamespace.Hello;
+
+            function sayHello(): Int {
+                return 42;
+            }
+            """,
+            """
+            import ThisIsMyNamespace.Hello;
+
+            export function main(): Int {
+                return sayHello();
+            }
+            """);
+
+        var main = jit.GetFunction<NullaryLongFunc>("main");
+
+        Assert.Equal(42, main());
+    }
+
+    [Fact]
+    public void A_static_variables_initializer_resolves_names_from_its_own_files_imports()
+    {
+        // Construction (not a function call, to avoid a separate pre-existing issue where a function
+        // referenced from a static initializer trips CheckFunctionCore's own blanket "every function
+        // sees every static" re-entrancy — orthogonal to multi-file compilation, since it already
+        // reproduces in single-file source too) still exercises the exact same context-swap: 'Config'
+        // must resolve under 'total's own file's imports.
+        using var jit = GenerateAndJitMultiFile(
+            """
+            module Constants;
+
+            struct Config {
+                amount: Int
+            }
+            """,
+            """
+            import Constants;
+
+            static let cfg: Config = Config(amount: 101);
+
+            export function main(): Int {
+                return cfg.amount;
+            }
+            """);
+
+        var main = jit.GetFunction<NullaryLongFunc>("main");
+
+        Assert.Equal(101, main());
     }
 
     // --- Object file emission (`KokosObjectEmitter`) ------------------------------------------------

@@ -35,6 +35,7 @@ public enum TokenKind
     FreeKeyword,
     ImportKeyword,
     ExportKeyword,
+    ModuleKeyword,
 
     // Punctuation
     OpenParen,

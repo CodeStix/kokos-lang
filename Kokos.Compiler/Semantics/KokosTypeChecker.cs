@@ -307,38 +307,69 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         if (_staticVariableBindings.TryGetValue(node, out var cached))
             return cached;
 
-        var type = _resolver.Resolve(node.Type);
-        var ownership = KokosModifierMapper.OwnershipOf(node.Type, type, KokosOwnershipKind.Owned, _table);
-        var isReadOnly = KokosModifierMapper.IsReadOnlyOf(node.Type, _table);
-
-        if (node.Initializer is not null)
+        var saved = ActivateContext(node);
+        try
         {
-            var initializerType = CheckExpression(node.Initializer, type);
-            if (!IsAssignable(initializerType, type))
+            var type = _resolver.Resolve(node.Type);
+            var ownership = KokosModifierMapper.OwnershipOf(node.Type, type, KokosOwnershipKind.Owned, _table);
+            var isReadOnly = KokosModifierMapper.IsReadOnlyOf(node.Type, _table);
+
+            if (node.Initializer is not null)
+            {
+                var initializerType = CheckExpression(node.Initializer, type);
+                if (!IsAssignable(initializerType, type))
+                {
+                    _diagnostics.ReportError(node.NameToken.Span,
+                        $"Cannot assign a value of type '{initializerType.DisplayName}' to '{node.Name}' of type '{type.DisplayName}'.");
+                }
+
+                if (ownership is KokosOwnershipKind.Owned or KokosOwnershipKind.Unowned or KokosOwnershipKind.Manual
+                    && TryGetOwnership(node.Initializer, out var sourceOwnership) && sourceOwnership == KokosOwnershipKind.Unmanaged)
+                {
+                    _diagnostics.ReportError(node.NameToken.Span,
+                        "Cannot use an 'unmanaged' reference where a tracked owned/unowned/manual reference is expected.");
+                }
+
+                CheckNoLeakingWeakening(node.Initializer, ownership, node.NameToken.Span, "This initializer");
+                CheckNoReadOnlyNarrowing(node.Initializer, ownership, isReadOnly, node.NameToken.Span, "This initializer");
+            }
+            else if (type.IsPointerShaped && type is not KokosOptionalType)
             {
                 _diagnostics.ReportError(node.NameToken.Span,
-                    $"Cannot assign a value of type '{initializerType.DisplayName}' to '{node.Name}' of type '{type.DisplayName}'.");
+                    $"Static variable '{node.Name}' requires an initializer because '{type.DisplayName}' can't be null.");
             }
 
-            if (ownership is KokosOwnershipKind.Owned or KokosOwnershipKind.Unowned or KokosOwnershipKind.Manual
-                && TryGetOwnership(node.Initializer, out var sourceOwnership) && sourceOwnership == KokosOwnershipKind.Unmanaged)
-            {
-                _diagnostics.ReportError(node.NameToken.Span,
-                    "Cannot use an 'unmanaged' reference where a tracked owned/unowned/manual reference is expected.");
-            }
-
-            CheckNoLeakingWeakening(node.Initializer, ownership, node.NameToken.Span, "This initializer");
-            CheckNoReadOnlyNarrowing(node.Initializer, ownership, isReadOnly, node.NameToken.Span, "This initializer");
+            var binding = new KokosBinding(type, ownership, isStatic: true, isReadOnly: isReadOnly);
+            _staticVariableBindings[node] = binding;
+            return binding;
         }
-        else if (type.IsPointerShaped && type is not KokosOptionalType)
+        finally
         {
-            _diagnostics.ReportError(node.NameToken.Span,
-                $"Static variable '{node.Name}' requires an initializer because '{type.DisplayName}' can't be null.");
+            RestoreContext(saved);
         }
+    }
 
-        var binding = new KokosBinding(type, ownership, isStatic: true, isReadOnly: isReadOnly);
-        _staticVariableBindings[node] = binding;
-        return binding;
+    /// <summary>
+    /// Swaps <see cref="_table"/>'s active namespace-visibility context (and <see cref="_diagnostics"/>'s
+    /// file tag in lockstep) to whichever file <paramref name="node"/> was itself declared in — see
+    /// <see cref="KokosTypeResolver.ActivateContext"/>, the exact same mechanism, needed here for the
+    /// same reason: a lazily-triggered cross-file resolution (a forward-referencing call, a static
+    /// initializer referencing another static, ...) must check the referenced declaration's *own* body
+    /// against *its* file's imports, not whichever file's checking happened to trigger it.
+    /// </summary>
+    private (KokosFileContext PreviousContext, string? PreviousFile) ActivateContext(KokosMemberNode node)
+    {
+        var saved = (_table.CurrentContext, _diagnostics.CurrentFile);
+        var context = _table.ContextOf(node);
+        _table.CurrentContext = context;
+        _diagnostics.CurrentFile = context.SourceFile;
+        return saved;
+    }
+
+    private void RestoreContext((KokosFileContext PreviousContext, string? PreviousFile) saved)
+    {
+        _table.CurrentContext = saved.PreviousContext;
+        _diagnostics.CurrentFile = saved.PreviousFile;
     }
 
     /// <summary>
@@ -351,21 +382,29 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         if (_functionTypes.TryGetValue(node, out var cached))
             return cached;
 
-        if (!_inProgress.Add(node))
+        var saved = ActivateContext(node);
+        try
         {
-            _diagnostics.ReportError(node.NameToken.Span,
-                $"Cannot infer the return type of '{node.Name}' because it depends on itself; add an explicit return type annotation.");
-            var errorParameterTypes = ResolveParameterTypesOnly(node);
-            var errorParameterOwnership = errorParameterTypes.Select(_ => KokosOwnershipKind.Inferred).ToList();
-            var errorResult = new KokosFunctionType(errorParameterTypes, errorParameterOwnership, KokosErrorType.Instance, KokosOwnershipKind.Inferred, node);
-            _functionTypes[node] = errorResult;
-            return errorResult;
-        }
+            if (!_inProgress.Add(node))
+            {
+                _diagnostics.ReportError(node.NameToken.Span,
+                    $"Cannot infer the return type of '{node.Name}' because it depends on itself; add an explicit return type annotation.");
+                var errorParameterTypes = ResolveParameterTypesOnly(node);
+                var errorParameterOwnership = errorParameterTypes.Select(_ => KokosOwnershipKind.Inferred).ToList();
+                var errorResult = new KokosFunctionType(errorParameterTypes, errorParameterOwnership, KokosErrorType.Instance, KokosOwnershipKind.Inferred, node);
+                _functionTypes[node] = errorResult;
+                return errorResult;
+            }
 
-        var result = CheckFunctionCore(node);
-        _inProgress.Remove(node);
-        _functionTypes[node] = result;
-        return result;
+            var result = CheckFunctionCore(node);
+            _inProgress.Remove(node);
+            _functionTypes[node] = result;
+            return result;
+        }
+        finally
+        {
+            RestoreContext(saved);
+        }
     }
 
     private List<KokosType> ResolveParameterTypesOnly(KokosFunctionNode node) =>
@@ -642,6 +681,11 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
     public KokosType VisitTypeAlias(KokosTypeAliasNode node) => _resolver.ResolveTypeAlias(node);
     public KokosType VisitEnumDecl(KokosEnumDeclNode node) => _resolver.ResolveEnum(node);
     public KokosType VisitStructDecl(KokosStructDeclNode node) => _resolver.ResolveStruct(node);
+
+    // Handled entirely by KokosDeclarationTable's namespace bookkeeping before any member is
+    // checked — nothing left to do when VisitCompilationUnit's own member loop reaches one directly.
+    public KokosType VisitModuleDecl(KokosModuleDeclNode node) => KokosUnknownType.Instance;
+    public KokosType VisitImportDirective(KokosImportDirectiveNode node) => KokosUnknownType.Instance;
 
     public KokosType VisitEnumVariant(KokosEnumVariantNode node) =>
         throw new NotSupportedException($"{nameof(KokosEnumVariantNode)} has no standalone type; it's only meaningful as part of resolving its enum.");

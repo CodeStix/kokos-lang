@@ -51,16 +51,48 @@ public sealed class KokosTypeResolver : IKokosVisitor<KokosType>
         if (_resolved.TryGetValue(node, out var cached))
             return cached;
 
-        var structType = new KokosStructType(node.Name, node.ValueKeyword is not null, []);
-        _resolved[node] = structType;
+        var saved = ActivateContext(node);
+        try
+        {
+            var structType = new KokosStructType(node.Name, node.ValueKeyword is not null, []);
+            _resolved[node] = structType;
 
-        var fields = ResolveFields(node.Fields.Items);
-        structType.SetFields(fields);
+            var fields = ResolveFields(node.Fields.Items);
+            structType.SetFields(fields);
 
-        if (structType.IsValueType)
-            CheckNoValueCycle(node, structType);
+            if (structType.IsValueType)
+                CheckNoValueCycle(node, structType);
 
-        return structType;
+            return structType;
+        }
+        finally
+        {
+            RestoreContext(saved);
+        }
+    }
+
+    /// <summary>
+    /// Swaps <see cref="_table"/>'s active namespace-visibility context (and <see cref="_diagnostics"/>'s
+    /// file tag in lockstep) to whichever file <paramref name="node"/> was itself declared in, so any
+    /// name this declaration's own syntax references resolves under *its* imports — not whichever
+    /// file's checking happened to trigger this resolution lazily. Every memoized entry point that can
+    /// be reached cross-file (this one, <see cref="ResolveNamedDeclaration"/>, and their
+    /// <see cref="KokosTypeChecker"/> counterparts) does this exact save/swap/restore dance around its
+    /// own real work.
+    /// </summary>
+    private (KokosFileContext PreviousContext, string? PreviousFile) ActivateContext(KokosMemberNode node)
+    {
+        var saved = (_table.CurrentContext, _diagnostics.CurrentFile);
+        var context = _table.ContextOf(node);
+        _table.CurrentContext = context;
+        _diagnostics.CurrentFile = context.SourceFile;
+        return saved;
+    }
+
+    private void RestoreContext((KokosFileContext PreviousContext, string? PreviousFile) saved)
+    {
+        _table.CurrentContext = saved.PreviousContext;
+        _diagnostics.CurrentFile = saved.PreviousFile;
     }
 
     private void CheckNoValueCycle(KokosStructDeclNode node, KokosStructType structType)
@@ -103,7 +135,17 @@ public sealed class KokosTypeResolver : IKokosVisitor<KokosType>
             return KokosErrorType.Instance;
         }
 
-        var result = resolveCore();
+        var saved = ActivateContext(node);
+        KokosType result;
+        try
+        {
+            result = resolveCore();
+        }
+        finally
+        {
+            RestoreContext(saved);
+        }
+
         _inProgress.Remove(node);
         _resolved[node] = result;
         return result;
@@ -313,6 +355,8 @@ public sealed class KokosTypeResolver : IKokosVisitor<KokosType>
         new($"{node} is not a type expression; {nameof(KokosTypeResolver)} only visits {nameof(KokosTypeNode)} subtrees.");
 
     public KokosType VisitCompilationUnit(KokosCompilationUnitNode node) => throw NotAType(nameof(KokosCompilationUnitNode));
+    public KokosType VisitModuleDecl(KokosModuleDeclNode node) => throw NotAType(nameof(KokosModuleDeclNode));
+    public KokosType VisitImportDirective(KokosImportDirectiveNode node) => throw NotAType(nameof(KokosImportDirectiveNode));
     public KokosType VisitFunction(KokosFunctionNode node) => throw NotAType(nameof(KokosFunctionNode));
     public KokosType VisitParameter(KokosParameterNode node) => throw NotAType(nameof(KokosParameterNode));
     public KokosType VisitBlock(KokosBlockNode node) => throw NotAType(nameof(KokosBlockNode));
