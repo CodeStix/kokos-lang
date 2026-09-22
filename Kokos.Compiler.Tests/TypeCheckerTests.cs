@@ -1392,8 +1392,37 @@ public class TypeCheckerTests
     }
 
     [Fact]
-    public void Binding_a_freshly_constructed_value_to_an_unowned_local_is_a_diagnostic()
+    public void Passing_a_freshly_constructed_value_as_an_unowned_argument_in_a_statement_is_auto_freed_not_a_diagnostic()
     {
+        // The exact reported repro shape (reduced): 'borrow(Person(...))' used as its own statement,
+        // not nested inside a return — the fresh 'Person(...)' temporary is auto-freed right after this
+        // statement instead of leaking or being rejected outright (contrast with the 'is_a_diagnostic'
+        // test above, where the same pattern nested inside a 'return' still has to be a hard error,
+        // since there's no statement boundary left afterward to free anything at).
+        const string source = """
+            struct Person { age: Int }
+
+            function borrow(p: unowned Person): Int { return p.age; }
+
+            function f(age: Int) {
+                borrow(Person(age: age));
+            }
+            """;
+
+        var (unit, _, checker, diagnostics) = Setup(source);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[1]);
+        checker.VisitFunction((KokosFunctionNode)unit.Members[2]);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Binding_a_freshly_constructed_value_to_an_unowned_local_is_auto_freed_not_a_diagnostic()
+    {
+        // 'let' is a real statement, unlike a return's own expression tree — so the never-bound
+        // 'Person(...)' temporary being weakened to 'unowned' here is auto-freed by the compiler right
+        // after this statement (see KokosTypeChecker.CheckNoLeakingWeakening/TryGetTemporaryReleases)
+        // instead of being reported as a permanent leak.
         const string source = """
             struct Person { age: Int }
 
@@ -1406,12 +1435,14 @@ public class TypeCheckerTests
         var (unit, _, checker, diagnostics) = Setup(source);
         checker.VisitFunction((KokosFunctionNode)unit.Members[1]);
 
-        Assert.True(diagnostics.HasErrors);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
     }
 
     [Fact]
-    public void Assigning_a_freshly_constructed_value_into_an_unowned_target_is_a_diagnostic()
+    public void Assigning_a_freshly_constructed_value_into_an_unowned_target_is_auto_freed_not_a_diagnostic()
     {
+        // An assignment is always reached via an expression-statement, so this is the same auto-free
+        // case as the 'let' one above.
         const string source = """
             struct Person { age: Int }
 
@@ -1424,7 +1455,7 @@ public class TypeCheckerTests
         var (unit, _, checker, diagnostics) = Setup(source);
         checker.VisitFunction((KokosFunctionNode)unit.Members[1]);
 
-        Assert.True(diagnostics.HasErrors);
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
     }
 
     [Fact]

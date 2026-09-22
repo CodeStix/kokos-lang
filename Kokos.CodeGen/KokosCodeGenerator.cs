@@ -48,6 +48,19 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     private readonly LLVMBuilderRef _builder;
 
     private Dictionary<string, (LLVMValueRef Pointer, LLVMTypeRef Type, KokosOwnershipKind Ownership, KokosType KokosType)> _scope = new();
+
+    /// <summary>
+    /// The LLVM value/type of every never-bound temporary expression evaluated so far while generating
+    /// the statement currently in progress — cleared at the start of each statement in
+    /// <see cref="VisitBlock"/>, which is also what consumes it (see <see cref="ReleasePendingTemporaries"/>)
+    /// against <see cref="KokosTypeChecker.TryGetTemporaryReleases"/>'s own list of exactly which of
+    /// these actually need freeing. Recorded unconditionally at every call site the checker's
+    /// corresponding `CheckNoLeakingWeakening` call also runs against (a call argument, a
+    /// construction-call field, a `let` initializer, an assignment's value) — cheap, and simpler than
+    /// asking the checker "will you need this one?" before generating it.
+    /// </summary>
+    private readonly Dictionary<KokosExpressionNode, (LLVMValueRef Value, KokosType Type)> _pendingTemporaryValues = new();
+
     private LLVMValueRef _currentFunction;
     private KokosFunctionType _currentFunctionType = null!;
     private readonly LLVMValueRef _abortFunction;
@@ -392,14 +405,36 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     public LLVMValueRef VisitBlock(KokosBlockNode node)
     {
         foreach (var statement in node.Statements)
+        {
+            _pendingTemporaryValues.Clear();
             statement.Accept(this);
+            ReleasePendingTemporaries(statement);
+        }
 
         return default;
+    }
+
+    /// <summary>
+    /// Frees every never-bound 'owned' temporary <see cref="KokosTypeChecker.TryGetTemporaryReleases"/>
+    /// recorded against <paramref name="statement"/> — see <see cref="_pendingTemporaryValues"/>, which
+    /// this both reads and clears.
+    /// </summary>
+    private void ReleasePendingTemporaries(KokosNode statement)
+    {
+        if (!_checker.TryGetTemporaryReleases(statement, out var expressions))
+            return;
+
+        foreach (var expression in expressions)
+        {
+            if (_pendingTemporaryValues.TryGetValue(expression, out var captured))
+                EmitReleaseGuardingNull(captured.Value, captured.Type);
+        }
     }
 
     public LLVMValueRef VisitVarDecl(KokosVarDeclNode node)
     {
         var value = node.Initializer.Accept(this);
+        _pendingTemporaryValues[node.Initializer] = (value, _checker.ExpressionTypes[node.Initializer]);
         var kokosType = _checker.LocalTypes[node];
         var ownership = _checker.LocalOwnership[node];
 
@@ -615,6 +650,7 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     public LLVMValueRef VisitAssignment(KokosAssignmentNode node)
     {
         var value = node.Value.Accept(this);
+        _pendingTemporaryValues[node.Value] = (value, _checker.ExpressionTypes[node.Value]);
         var sourceOwnership = GetOwnership(node.Value);
         var sourceType = _checker.ExpressionTypes[node.Value];
 
@@ -1416,6 +1452,7 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         {
             var argumentExpression = node.Arguments.Items[i].Expression;
             var value = argumentExpression.Accept(this);
+            _pendingTemporaryValues[argumentExpression] = (value, _checker.ExpressionTypes[argumentExpression]);
             args[i] = ConvertOwnership(value, GetOwnership(argumentExpression), calleeFunctionType.ParameterOwnership[i],
                 _checker.ExpressionTypes[argumentExpression], calleeFunctionType.ParameterTypes[i]);
         }
@@ -1454,6 +1491,7 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
                 var (name, expression) = arguments[i];
                 var field = (name is not null ? structType.FindField(name) : structType.FindField(i))!;
                 var value = expression.Accept(this);
+                _pendingTemporaryValues[expression] = (value, _checker.ExpressionTypes[expression]);
                 var converted = ConvertOwnership(value, GetOwnership(expression), field.Ownership, _checker.ExpressionTypes[expression], field.Type);
                 aggregate = _builder.BuildInsertValue(aggregate, converted, (uint)field.OrdinalPosition, "ctor");
             }
@@ -1472,6 +1510,7 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
             var (name, expression) = arguments[i];
             var field = (name is not null ? structType.FindField(name) : structType.FindField(i))!;
             var value = expression.Accept(this);
+            _pendingTemporaryValues[expression] = (value, _checker.ExpressionTypes[expression]);
             var converted = ConvertOwnership(value, GetOwnership(expression), field.Ownership, _checker.ExpressionTypes[expression], field.Type);
             var fieldPointer = _builder.BuildStructGEP2(_typeMapper.MapStructBody(structType), bodyPointer, (uint)field.OrdinalPosition, "fieldptr");
             _builder.BuildStore(converted, fieldPointer);

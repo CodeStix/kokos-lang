@@ -494,6 +494,42 @@ public class CodeGenTests
     }
 
     [Fact]
+    public void A_freshly_constructed_argument_passed_as_unowned_is_automatically_freed_after_its_statement()
+    {
+        // The reported repro's shape: 'Person(age: 42)' is a fresh temporary, never bound to a name,
+        // passed straight into 'borrow's 'unowned' parameter — KokosTypeChecker no longer rejects this
+        // as an unrecoverable leak (see CheckNoLeakingWeakening/TryGetTemporaryReleases); instead the
+        // compiler frees it itself right after the 'borrow(...)' statement finishes. 'watch' is an
+        // independent unowned alias 'borrow' stashes it through, captured *before* that free, so
+        // 'destroyed(watch)' afterward is the concrete, end-to-end proof the free actually happened —
+        // not just that the program compiled and didn't crash.
+        using var jit = GenerateAndJit(
+            """
+            struct Person { age: Int }
+
+            static let seed: Person = Person(age: 0);
+            static let watch: unowned Person = seed;
+
+            function borrow(p: unowned Person): Int {
+                watch = p;
+                return p.age;
+            }
+
+            export function f(): Int {
+                borrow(Person(age: 42));
+                if destroyed(watch) {
+                    return 1;
+                }
+                return 0;
+            }
+            """);
+
+        var f = jit.GetFunction<NullaryLongFunc>("f");
+
+        Assert.Equal(1, f());
+    }
+
+    [Fact]
     public void ChooseOldest_releases_the_person_it_does_not_return()
     {
         // watchB is an independent unowned reference to b, captured before the call. chooseOldest's

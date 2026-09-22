@@ -1,9 +1,13 @@
+module LinkTest;
+
 import TestModule.String;
+
+export type Void = (Int, Int);
 
 export function add(a: Int, b: Int) {
     return a + b;
 }
 
-export function main() {
-
+export function main(): Void {
+    return (10, 20);
 }

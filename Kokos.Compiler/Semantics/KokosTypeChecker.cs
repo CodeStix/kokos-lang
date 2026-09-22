@@ -39,6 +39,18 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
     private readonly HashSet<KokosFunctionNode> _inProgress = new();
     private readonly Dictionary<KokosStaticVarDeclNode, KokosBinding> _staticVariableBindings = new();
     private readonly Dictionary<string, (KokosType Type, KokosOwnershipKind Ownership, bool IsReadOnly)> _staticVariables = new();
+    private readonly Dictionary<KokosNode, List<KokosExpressionNode>> _temporaryReleases = new();
+
+    /// <summary>
+    /// The statement currently being checked (a <see cref="KokosVarDeclNode"/> or
+    /// <see cref="KokosExpressionStatementNode"/> — the two statement kinds that can weaken a freshly
+    /// produced 'owned' temporary to 'unowned'), or null outside of one (e.g. while resolving a static
+    /// variable's initializer, which stays a hard error — see <see cref="CheckNoLeakingWeakening"/>).
+    /// Saved/restored around each statement visit so a lazily-triggered check of a *different*
+    /// statement (a forward-referenced function's body, re-entered mid-check) can never leak its own
+    /// value into this one once it returns.
+    /// </summary>
+    private KokosNode? _currentStatement;
 
     /// <summary>Every function's resolved signature, keyed by declaration — consumed by codegen.</summary>
     public IReadOnlyDictionary<KokosFunctionNode, KokosFunctionType> FunctionTypes => _functionTypes;
@@ -89,6 +101,27 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
     /// moved-out field, so codegen never has to reason about partial moves.
     /// </summary>
     public IReadOnlyDictionary<KokosNode, IReadOnlyList<string>> ReleasePoints => _releasePoints;
+
+    /// <summary>
+    /// Every fresh, never-bound 'owned' temporary (a function call or struct/tuple/array construction
+    /// used directly as a call argument, construction field, `let` initializer, or assignment's value —
+    /// never a bound local, which the ordinary move checker already covers via <see cref="ReleasePoints"/>)
+    /// that got weakened to 'unowned' somewhere within <paramref name="statement"/>, and therefore has
+    /// nothing else left to free it — codegen releases each one immediately after generating
+    /// <paramref name="statement"/> (see <see cref="CheckNoLeakingWeakening"/>, which populates this
+    /// instead of reporting an error for exactly this shape).
+    /// </summary>
+    public bool TryGetTemporaryReleases(KokosNode statement, out IReadOnlyList<KokosExpressionNode> expressions)
+    {
+        if (_temporaryReleases.TryGetValue(statement, out var list))
+        {
+            expressions = list;
+            return true;
+        }
+
+        expressions = [];
+        return false;
+    }
 
     /// <summary>A name's resolved type plus the ownership modifier it was explicitly declared with (if any).</summary>
     private sealed class KokosBinding
@@ -882,6 +915,20 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
 
     public KokosType VisitVarDecl(KokosVarDeclNode node)
     {
+        var savedStatement = _currentStatement;
+        _currentStatement = node;
+        try
+        {
+            return VisitVarDeclCore(node);
+        }
+        finally
+        {
+            _currentStatement = savedStatement;
+        }
+    }
+
+    private KokosType VisitVarDeclCore(KokosVarDeclNode node)
+    {
         var expected = node.Type is null ? null : _resolver.Resolve(node.Type);
         var initializerType = CheckExpression(node.Initializer, expected);
 
@@ -996,7 +1043,19 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         return expressionType;
     }
 
-    public KokosType VisitExpressionStatement(KokosExpressionStatementNode node) => TypeOf(node.Expression);
+    public KokosType VisitExpressionStatement(KokosExpressionStatementNode node)
+    {
+        var savedStatement = _currentStatement;
+        _currentStatement = node;
+        try
+        {
+            return TypeOf(node.Expression);
+        }
+        finally
+        {
+            _currentStatement = savedStatement;
+        }
+    }
 
     /// <summary>
     /// Implements the spec's conditional-move rule via a dataflow merge over <see cref="_consumed"/>:
@@ -1572,24 +1631,33 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
     };
 
     /// <summary>
-    /// Reports an error when a freshly-`owned` value is weakened to `unowned` in a way that leaves
-    /// nothing able to ever free it. `unowned` is deliberately the one ownership kind `free()`/
-    /// `destroyed()` can never target, so once a uniquely-owned allocation is converted to `unowned`
-    /// with no other still-live `owned`/`manual` handle anywhere, it's unreachable by any freeing
-    /// operation for the rest of the program — a permanent leak. `manual` is never checked here: an
-    /// `owned -> manual` conversion is a pure bit-reinterpretation (see
-    /// <see cref="KokosCodeGenerator.ConvertOwnership"/>'s reborrow, in Kokos.CodeGen) that keeps the
-    /// same underlying pointer alive, so whoever ends up with the `manual` value can always `free()` it
-    /// later — there's nothing to leak.
+    /// Guards against a freshly-`owned` value being weakened to `unowned` in a way that leaves nothing
+    /// able to ever free it. `unowned` is deliberately the one ownership kind `free()`/`destroyed()`
+    /// can never target, so once a uniquely-owned allocation is converted to `unowned` with no other
+    /// still-live `owned`/`manual` handle anywhere, it's unreachable by any freeing operation for the
+    /// rest of the program — a permanent leak, unless nothing else ever needed to reach it, which is
+    /// exactly the never-bound-temporary case this handles by auto-freeing instead (see below).
+    /// `manual` is never checked here: an `owned -> manual` conversion is a pure bit-reinterpretation
+    /// (see <see cref="KokosCodeGenerator.ConvertOwnership"/>'s reborrow, in Kokos.CodeGen) that keeps
+    /// the same underlying pointer alive, so whoever ends up with the `manual` value can always `free()`
+    /// it later — there's nothing to leak.
     ///
     /// For most call sites (a var-decl initializer, a call argument, a construction-call field, an
     /// assignment's value), a storage-backed source is exempt: none of those actually consume/transfer
     /// the source when weakening it to `unowned` (each gates its own `MarkTransferred` call on the
     /// *target* ownership being `Owned`), so the original `owned` binding stays live and is freed
-    /// normally later. A `return` statement is the one exception — per spec, returning unconditionally
-    /// consumes whatever's returned regardless of the declared return ownership, so even a
-    /// storage-backed local leaks once returned as `unowned`; that call site passes
-    /// <paramref name="exemptStorageBacked"/>: false.
+    /// normally later. A *non*-storage-backed source at one of those same call sites — a fresh function
+    /// call or struct/tuple/array construction used directly, e.g. `print(concat(a, b))` — has nothing
+    /// bound to free it later either, but unlike a mistakenly-weakened bound local, there was never any
+    /// way for the caller to have kept a handle to it in the first place (it's an anonymous expression
+    /// result); the compiler frees it itself, right after <see cref="_currentStatement"/> finishes (see
+    /// <see cref="TryGetTemporaryReleases"/> and <see cref="KokosCodeGenerator"/>'s consumption of it),
+    /// rather than forcing every such call to be rewritten as a bind-then-free. A `return` statement is
+    /// the one call site this auto-free doesn't apply to — per spec, returning unconditionally consumes
+    /// whatever's returned regardless of the declared return ownership, so even a storage-backed local
+    /// leaks once returned as `unowned`; that call site passes <paramref name="exemptStorageBacked"/>:
+    /// false, which keeps it a hard error (there's no enclosing statement left to free anything after —
+    /// the function is already returning).
     /// </summary>
     private void CheckNoLeakingWeakening(KokosExpressionNode expression, KokosOwnershipKind toOwnership, TextSpan span, string what, bool exemptStorageBacked = true)
     {
@@ -1601,6 +1669,15 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
 
         if (exemptStorageBacked && IsStorageBacked(expression))
             return;
+
+        if (exemptStorageBacked && _currentStatement is not null)
+        {
+            if (!_temporaryReleases.TryGetValue(_currentStatement, out var pending))
+                _temporaryReleases[_currentStatement] = pending = [];
+
+            pending.Add(expression);
+            return;
+        }
 
         _diagnostics.ReportError(span,
             $"{what} produces an 'owned' value with nothing left to free it once it's 'unowned' here — " +

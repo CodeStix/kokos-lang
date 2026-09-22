@@ -11,6 +11,10 @@ export function print(str: String) {
     puts(str);
 }
 
+export function test(str: String) {
+    return str;
+}
+
 export function input() {
     let str = [0i8 # 256];
     gets(str);
