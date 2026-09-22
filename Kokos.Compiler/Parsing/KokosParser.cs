@@ -115,6 +115,20 @@ public sealed class KokosParser
         if (Current.Kind == TokenKind.ImportKeyword && Peek(1).Kind == TokenKind.Identifier)
             return ParseImportDirective();
 
+        // `export` alone doesn't say what kind of member follows (unlike `import`, it's valid on a
+        // type alias/enum/struct as well as a function — see KokosStructDeclNode.IsExported) — the
+        // token right after it is what decides which ParseXxx to dispatch to, exactly mirroring the
+        // plain (no leading 'export') cases in the switch below.
+        if (Current.Kind == TokenKind.ExportKeyword)
+        {
+            if (Peek(1).Kind is TokenKind.TypeKeyword or TokenKind.OpaqueKeyword)
+                return ParseTypeAlias();
+            if (Peek(1).Kind == TokenKind.EnumKeyword)
+                return ParseEnumDecl();
+            if (Peek(1).Kind is TokenKind.StructKeyword or TokenKind.ValueKeyword)
+                return ParseStructDecl();
+        }
+
         return Current.Kind switch
         {
             TokenKind.TypeKeyword or TokenKind.OpaqueKeyword => ParseTypeAlias(),
@@ -240,23 +254,25 @@ public sealed class KokosParser
 
     private KokosTypeAliasNode ParseTypeAlias()
     {
+        var exportKeyword = Current.Kind == TokenKind.ExportKeyword ? Advance() : null;
         var opaqueKeyword = Current.Kind == TokenKind.OpaqueKeyword ? Advance() : null;
         var typeKeyword = Expect(TokenKind.TypeKeyword, "'type'");
         var name = Expect(TokenKind.Identifier, "a type name");
         var equals = Expect(TokenKind.Equals, "'='");
         var type = ParseType();
         var semicolon = Expect(TokenKind.Semicolon, "';'");
-        return new KokosTypeAliasNode(opaqueKeyword, typeKeyword, name, equals, type, semicolon);
+        return new KokosTypeAliasNode(exportKeyword, opaqueKeyword, typeKeyword, name, equals, type, semicolon);
     }
 
     private KokosEnumDeclNode ParseEnumDecl()
     {
-        var enumKeyword = Advance();
+        var exportKeyword = Current.Kind == TokenKind.ExportKeyword ? Advance() : null;
+        var enumKeyword = Expect(TokenKind.EnumKeyword, "'enum'");
         var name = Expect(TokenKind.Identifier, "an enum name");
         var openBrace = Expect(TokenKind.OpenBrace, "'{'");
         var variants = ParseSeparatedList(TokenKind.CloseBrace, ParseEnumVariant);
         var closeBrace = Expect(TokenKind.CloseBrace, "'}'");
-        return new KokosEnumDeclNode(enumKeyword, name, openBrace, variants, closeBrace);
+        return new KokosEnumDeclNode(exportKeyword, enumKeyword, name, openBrace, variants, closeBrace);
     }
 
     private KokosEnumVariantNode ParseEnumVariant()
@@ -286,13 +302,14 @@ public sealed class KokosParser
 
     private KokosStructDeclNode ParseStructDecl()
     {
+        var exportKeyword = Current.Kind == TokenKind.ExportKeyword ? Advance() : null;
         var valueKeyword = Current.Kind == TokenKind.ValueKeyword ? Advance() : null;
         var structKeyword = Expect(TokenKind.StructKeyword, "'struct'");
         var name = Expect(TokenKind.Identifier, "a struct name");
         var openBrace = Expect(TokenKind.OpenBrace, "'{'");
         var fields = ParseSeparatedList(TokenKind.CloseBrace, ParseField);
         var closeBrace = Expect(TokenKind.CloseBrace, "'}'");
-        return new KokosStructDeclNode(valueKeyword, structKeyword, name, openBrace, fields, closeBrace);
+        return new KokosStructDeclNode(exportKeyword, valueKeyword, structKeyword, name, openBrace, fields, closeBrace);
     }
 
     /// <summary>Parses <c>Type</c>, <c>name: Type</c>, or <c>0 name: Type</c> — shared by struct bodies and inline tuple types.</summary>

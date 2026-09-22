@@ -209,6 +209,29 @@ public class RoundTripTests
         // 'function'/'(' rather than a bare identifier — this must keep parsing exactly as before.
         yield return ["import function puts(str: CString): Int;"];
         yield return ["import(c) function puts(str: CString): Int;"];
+
+        // 'export' on a type alias/enum/struct declaration (for KokosHeaderEmitter — see
+        // Kokos/Program.cs's '--emit-object' handling).
+        yield return ["export type String = [Int8];"];
+        yield return ["export opaque type String = [Int8];"];
+        yield return ["""
+            export enum FruitKind {
+                Apple,
+                Pear
+            }
+            """];
+        yield return ["""
+            export struct Person {
+                age: Int
+            }
+            """];
+        yield return ["""
+            export value struct Vector3 {
+                0 x: Int,
+                1 y: Int,
+                2 z: Int
+            }
+            """];
     }
 
     [Theory]

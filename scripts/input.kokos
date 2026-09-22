@@ -150,3 +150,28 @@ memset(largeBlock, 1500, 0); // set the whole block to 0
 // gen_ptr.gen == 0
 // block->generation == 0
 check(gen_ptr) -> OK: 0 == 0 THIS IS FATAL, THE POINTER IS VALID AGAIN BECAUSE OF THE NEWLY ALLOCATED BLOCK OVERWROTE THE GENERATION VALUE OF THE FREED POINTER
+
+
+please start implementing multifile compilation. 
+when the compiler is ran in a specific folder all the nested kokos files should be compiled into the same llvm module.
+
+please also introduce a namespacing system:
+
+// file A
+module ThisIsMyNamespace.Hello;
+
+function sayHello() {
+    // ...
+}
+
+// file B
+function main() {
+    sayHello(); // error: sayHello is not defined
+}
+
+// file C
+import ThisIsMyNamespace.Hello;
+
+function main() {
+    sayHello(); // ok
+}

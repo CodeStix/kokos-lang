@@ -1,5 +1,6 @@
 using Kokos.CodeGen;
 using Kokos.Compiler.Diagnostics;
+using Kokos.Compiler.Formatting;
 using Kokos.Compiler.Parsing;
 using Kokos.Compiler.Semantics;
 using Kokos.Compiler.Syntax.Nodes;
@@ -148,6 +149,7 @@ internal class Program
             {
                 KokosObjectEmitter.EmitObjectFile(module, emitObjectPath);
                 Console.WriteLine($"=== Wrote object file: {emitObjectPath} ===");
+                EmitHeaders(units, emitObjectPath);
                 return 0;
             }
 
@@ -194,6 +196,35 @@ internal class Program
 
         value = args[++i];
         return true;
+    }
+
+    /// <summary>
+    /// Writes a header file (see <see cref="Kokos.Compiler.Formatting.KokosHeaderEmitter"/>) next to
+    /// the just-written object file for every unit that exports at least one member, mirroring that
+    /// unit's own relative path (<see cref="KokosCompilationUnitNode.SourceFile"/>) under the object
+    /// file's own directory — so a project with, say, <c>src/strings/utf8.kokos</c> exporting something
+    /// gets <c>&lt;objDir&gt;/strings/utf8.kokos</c> as its header, keeping the same tree structure a
+    /// downstream project can drop straight into its own sources alongside <c>--library</c>-linking the
+    /// object file itself. A unit that exports nothing is silently skipped — no header, nothing to
+    /// link against from outside anyway.
+    /// </summary>
+    private static void EmitHeaders(IReadOnlyList<KokosCompilationUnitNode> units, string emitObjectPath)
+    {
+        var headerRoot = Path.GetDirectoryName(Path.GetFullPath(emitObjectPath)) ?? ".";
+
+        foreach (var unit in units)
+        {
+            if (!KokosHeaderEmitter.TryBuildHeader(unit, out var headerText))
+                continue;
+
+            var headerPath = Path.Combine(headerRoot, unit.SourceFile ?? $"{Path.GetFileNameWithoutExtension(emitObjectPath)}.kokos");
+            var headerDirectory = Path.GetDirectoryName(headerPath);
+            if (!string.IsNullOrEmpty(headerDirectory))
+                Directory.CreateDirectory(headerDirectory);
+
+            File.WriteAllText(headerPath, headerText);
+            Console.WriteLine($"=== Wrote header: {headerPath} ===");
+        }
     }
 
     /// <summary>

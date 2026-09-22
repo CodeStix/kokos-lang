@@ -129,6 +129,38 @@ public class FormatterTests
     }
 
     [Fact]
+    public void Preserves_export_on_a_struct_type_alias_and_enum()
+    {
+        const string source = """
+            export type String = [Int8];
+            export enum FruitKind {
+                Apple
+            }
+            export struct Person {
+                age: Int
+            }
+            """;
+
+        var unit = KokosParser.Parse(source, out var diagnostics);
+        Assert.False(diagnostics.HasErrors);
+
+        Assert.Equal(
+            """
+            export type String = [Int8];
+
+            export enum FruitKind {
+                Apple
+            }
+
+            export struct Person {
+                age: Int
+            }
+
+            """,
+            KokosFormatter.Format(unit));
+    }
+
+    [Fact]
     public void Normalizes_a_value_struct_with_positional_indices()
     {
         const string messy = "value struct Vector3{0 x:Int,1 y:Int,2 z:Int}";

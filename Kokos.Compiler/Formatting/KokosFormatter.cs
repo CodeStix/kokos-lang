@@ -58,14 +58,16 @@ public sealed class KokosFormatter : IKokosVisitor<string>
 
     public string VisitTypeAlias(KokosTypeAliasNode node)
     {
+        var export = node.ExportKeyword is null ? "" : "export ";
         var opaque = node.OpaqueKeyword is null ? "" : "opaque ";
-        return $"{opaque}type {node.Name} = {node.Type.Accept(this)};";
+        return $"{export}{opaque}type {node.Name} = {node.Type.Accept(this)};";
     }
 
     public string VisitEnumDecl(KokosEnumDeclNode node)
     {
+        var export = node.ExportKeyword is null ? "" : "export ";
         var body = FormatCommaSeparatedBody(node.Variants.Items.Select(v => v.Accept(this)));
-        return $"enum {node.Name} {body}";
+        return $"{export}enum {node.Name} {body}";
     }
 
     public string VisitEnumVariant(KokosEnumVariantNode node)
@@ -77,9 +79,10 @@ public sealed class KokosFormatter : IKokosVisitor<string>
 
     public string VisitStructDecl(KokosStructDeclNode node)
     {
+        var export = node.ExportKeyword is null ? "" : "export ";
         var valuePrefix = node.ValueKeyword is null ? "" : "value ";
         var body = FormatCommaSeparatedBody(node.Fields.Items.Select(f => f.Accept(this)));
-        return $"{valuePrefix}struct {node.Name} {body}";
+        return $"{export}{valuePrefix}struct {node.Name} {body}";
     }
 
     public string VisitField(KokosFieldNode node)
