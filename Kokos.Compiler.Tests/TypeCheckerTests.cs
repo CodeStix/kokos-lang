@@ -512,13 +512,43 @@ public class TypeCheckerTests
     }
 
     [Fact]
-    public void Function_with_no_return_statement_and_no_annotation_infers_Unknown()
+    public void Function_with_no_return_statement_and_no_annotation_infers_Void()
     {
         var (unit, _, checker, diagnostics) = Setup("function f() { let x = 5; }");
         var functionType = CheckFunction(checker, unit);
 
         Assert.False(diagnostics.HasErrors);
-        Assert.IsType<KokosUnknownType>(functionType.ReturnType);
+        Assert.IsType<KokosVoidType>(functionType.ReturnType);
+    }
+
+    [Fact]
+    public void An_explicit_void_return_type_is_accepted_with_a_bare_return()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f(): void { return; }");
+        var functionType = CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+        Assert.IsType<KokosVoidType>(functionType.ReturnType);
+    }
+
+    [Fact]
+    public void An_explicit_void_function_needs_no_trailing_return_statement()
+    {
+        // Unlike a real declared return type, falling off the end of a 'void' function is exactly as
+        // fine as falling off the end of an implicitly-void one.
+        var (unit, _, checker, diagnostics) = Setup("function f(): void { let x = 5; }");
+        CheckFunction(checker, unit);
+
+        Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
+    }
+
+    [Fact]
+    public void Returning_a_value_from_an_explicit_void_function_is_a_diagnostic()
+    {
+        var (unit, _, checker, diagnostics) = Setup("function f(): void { return 1; }");
+        CheckFunction(checker, unit);
+
+        Assert.True(diagnostics.HasErrors);
     }
 
     [Fact]

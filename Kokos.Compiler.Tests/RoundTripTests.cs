@@ -232,6 +232,10 @@ public class RoundTripTests
                 2 z: Int
             }
             """];
+
+        // 'void' as an explicit return-type annotation.
+        yield return ["function f(): void { return; }"];
+        yield return ["import function puts(str: CString): void;"];
     }
 
     [Theory]

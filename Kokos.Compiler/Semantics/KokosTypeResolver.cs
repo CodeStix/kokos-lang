@@ -250,6 +250,11 @@ public sealed class KokosTypeResolver : IKokosVisitor<KokosType>
         if (node.Name == "Bool")
             return KokosBoolType.Instance;
 
+        // 'void' is a reserved keyword (see TokenKind.VoidKeyword), not an identifier, so there's no
+        // ambiguity with a user-declared type of the same name — the tokenizer would never produce one.
+        if (node.Name == "void")
+            return KokosVoidType.Instance;
+
         if (KokosPrimitiveType.TryLookup(node.Name, out var primitive))
             return primitive;
 

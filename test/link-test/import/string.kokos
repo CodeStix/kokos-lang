@@ -1,0 +1,13 @@
+module TestModule.String;
+
+type String = readonly [Int8];
+
+type CString = unmanaged [Int8];
+
+import function print(str: String): void;
+
+import function test(str: String): readonly unowned [Int8];
+
+import function input(): owned [Int8 # 256];
+
+import function concat(a: String, b: String): owned [Int8];

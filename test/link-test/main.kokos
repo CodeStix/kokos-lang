@@ -1,13 +1,14 @@
-module LinkTest;
+module TestModule.Oof;
 
 import TestModule.String;
 
-export type Void = (Int, Int);
+export type Vector3 = value (Int, Int, Int);
 
-export function add(a: Int, b: Int) {
-    return a + b;
-}
+export function main() {
 
-export function main(): Void {
-    return (10, 20);
+    print("please input your name: ");
+
+    let input = input();
+
+    print(concat("your name is: ", input));
 }

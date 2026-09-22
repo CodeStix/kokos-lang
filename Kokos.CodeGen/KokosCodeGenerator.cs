@@ -144,11 +144,10 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
 
     private LLVMTypeRef MapFunctionSignature(KokosFunctionType functionType)
     {
-        // KokosUnknownType as a *return* type specifically means "no declared or inferred return
-        // value at all" (a function with neither a declared return type nor any return-with-a-value
-        // anywhere in its body, per KokosTypeChecker.CheckFunctionCore) — the one place this sentinel
-        // is a legitimate type to map, rather than a bug elsewhere.
-        var returnType = functionType.ReturnType is KokosUnknownType
+        // KokosVoidType as a return type means "no return value at all" — either written explicitly
+        // (': void') or inferred because the body never returns one (see
+        // KokosTypeChecker.InferReturnType) — and maps directly to LLVM's own void type.
+        var returnType = functionType.ReturnType is KokosVoidType
             ? Context.VoidType
             : _typeMapper.Map(functionType.ReturnType, functionType.ReturnOwnership);
 
@@ -1458,7 +1457,7 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         }
 
         // A void-returning call must be given an empty name — LLVM rejects naming a void value.
-        var callName = calleeFunctionType.ReturnType is KokosUnknownType ? "" : "calltmp";
+        var callName = calleeFunctionType.ReturnType is KokosVoidType ? "" : "calltmp";
         return _builder.BuildCall2(calleeLlvmType, callee, args, callName);
     }
 

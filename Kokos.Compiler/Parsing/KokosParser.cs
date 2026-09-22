@@ -419,6 +419,12 @@ public sealed class KokosParser
             case TokenKind.OpenParen:
                 return ParseTupleType();
 
+            // 'void' is a real reserved keyword (not a capitalized builtin type name like Int/Bool),
+            // but otherwise slots into type-expression parsing exactly like any other atomic type —
+            // KokosNamedTypeNode just wraps whatever token named it.
+            case TokenKind.VoidKeyword:
+                return new KokosNamedTypeNode(Advance());
+
             default:
             {
                 var name = Expect(TokenKind.Identifier, "a type name");

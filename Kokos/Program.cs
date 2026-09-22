@@ -281,7 +281,7 @@ internal class Program
     {
         switch (returnType)
         {
-            case KokosUnknownType:
+            case KokosVoidType:
                 jit.GetFunction<Action>("main")();
                 break;
 

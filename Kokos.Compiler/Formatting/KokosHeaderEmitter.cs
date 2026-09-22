@@ -21,9 +21,10 @@ namespace Kokos.Compiler.Formatting;
 /// A function becomes a bodyless <c>import function</c> declaration (the existing syntax for "this
 /// symbol is defined elsewhere" — exactly what it now is, from the header's own consumer's point of
 /// view) with its body/leading `export`/`export(c)` replaced by `import`/`import(c)`. A struct/enum/
-/// type-alias is copied through unchanged (including its own `export` keyword — there's no "declared
-/// vs. defined" split for a type the way there is for a function's body, and re-exporting it from
-/// whatever eventually consumes this header is reasonable, not accidental).
+/// type-alias is copied through with its own `export` keyword dropped: this header is meant to be
+/// dropped straight into a downstream project's own sources and compiled there directly, so it's
+/// declaring these types itself, not re-exporting someone else's — keeping `export` on would mark them
+/// as *that* project's own public interface too, which was never asked for.
 /// </summary>
 public static class KokosHeaderEmitter
 {
@@ -58,7 +59,7 @@ public static class KokosHeaderEmitter
                     break;
 
                 case KokosTypeAliasNode { IsExported: true } or KokosEnumDeclNode { IsExported: true } or KokosStructDeclNode { IsExported: true }:
-                    sections.Add(member.Accept(formatter));
+                    sections.Add(StripLeadingExportKeyword(member.Accept(formatter)));
                     break;
             }
         }
@@ -66,6 +67,16 @@ public static class KokosHeaderEmitter
         headerText = string.Join("\n\n", sections) + "\n";
         return true;
     }
+
+    /// <summary>
+    /// Drops the leading <c>"export "</c> a formatted struct/enum/type-alias declaration always starts
+    /// with here (see <see cref="Formatting.KokosFormatter.VisitStructDecl"/>/<c>VisitEnumDecl</c>/
+    /// <c>VisitTypeAlias</c>) — string surgery rather than a dedicated non-exporting formatter path,
+    /// since <c>export</c> can only ever appear as that exact leading substring for these three node
+    /// kinds (never inside a field/variant/underlying-type expression — it isn't a valid identifier).
+    /// </summary>
+    private static string StripLeadingExportKeyword(string formatted) =>
+        formatted.StartsWith("export ", StringComparison.Ordinal) ? formatted["export ".Length..] : formatted;
 
     private static bool IsExportedMember(KokosMemberNode member) => member switch
     {

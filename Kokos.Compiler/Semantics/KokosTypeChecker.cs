@@ -677,7 +677,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             // nothing here to infer, no move-checking to do (no locals), and nothing to release.
             if (node.IsImported)
             {
-                var importedReturnType = _currentDeclaredReturnType ?? KokosUnknownType.Instance;
+                var importedReturnType = _currentDeclaredReturnType ?? KokosVoidType.Instance;
                 var importedReturnOwnership = _currentDeclaredReturnOwnership ?? KokosOwnershipKind.Inferred;
                 var importedReturnReadOnly = _currentDeclaredReadOnlyReturn ?? false;
                 if (node.IsCAbi)
@@ -693,9 +693,12 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
             var effectiveReturnReadOnly = _currentDeclaredReadOnlyReturn
                 ?? InferReturnReadOnly(_currentReturnReadOnlyValues, effectiveReturnType);
 
-            // A function stays implicitly void-like (no requirement) only when it has neither a
-            // declared return type nor any return-with-a-value anywhere in its body.
-            var mustDefinitelyReturn = _currentDeclaredReturnType is not null || _currentReturnTypes.Count > 0;
+            // A function is exempt from this requirement when it has neither a declared return type
+            // nor any return-with-a-value anywhere in its body (implicitly void-like), and also when
+            // it's *explicitly* declared 'void' — falling off the end of a void function is exactly as
+            // fine as falling off the end of an implicitly-void one; there's no value either way that a
+            // caller could observe going missing.
+            var mustDefinitelyReturn = (_currentDeclaredReturnType is not null and not KokosVoidType) || _currentReturnTypes.Count > 0;
             if (mustDefinitelyReturn && !AlwaysReturns(node.Body!))
             {
                 _diagnostics.ReportError(node.NameToken.Span, $"Not all code paths in '{node.Name}' return a value.");
@@ -764,6 +767,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
     private static bool IsCBoundaryCompatible(KokosType type, KokosOwnershipKind ownership) => type switch
     {
         KokosUnknownType or KokosErrorType => true,
+        KokosVoidType => true,
         KokosPrimitiveType or KokosBoolType => true,
         _ => ownership == KokosOwnershipKind.Unmanaged,
     };
@@ -832,7 +836,7 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
     private KokosType InferReturnType(KokosFunctionNode node, List<KokosType> returnTypes)
     {
         if (returnTypes.Count == 0)
-            return KokosUnknownType.Instance;
+            return KokosVoidType.Instance;
 
         var first = returnTypes[0];
         if (returnTypes.Skip(1).All(t => ReferenceEquals(t, first)))

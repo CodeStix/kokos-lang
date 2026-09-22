@@ -88,13 +88,13 @@ public class HeaderEmitterTests
             """
             module MyModule;
 
-            export type String = [Int8];
+            type String = [Int8];
 
             import function concat(a: unowned String, b: unowned String): owned String;
 
             import function lowercase(a: unowned String): owned String;
 
-            export struct Person {
+            struct Person {
                 age: Int
             }
 
@@ -156,8 +156,10 @@ public class HeaderEmitterTests
     }
 
     [Fact]
-    public void An_exported_enum_is_copied_through_unchanged()
+    public void An_exported_enum_is_copied_through_with_its_export_keyword_dropped()
     {
+        // The header is meant to be compiled directly by a downstream project, not re-exported from
+        // it — so 'export' never survives into the header text, even though the source declared it.
         var (unit, checker) = Parse(
             """
             export function f(): Int { return 1; }
@@ -170,12 +172,13 @@ public class HeaderEmitterTests
         Assert.True(KokosHeaderEmitter.TryBuildHeader(unit, checker, out var headerText));
         Assert.Contains(
             """
-            export enum FruitKind {
+            enum FruitKind {
                 Apple,
                 Pear
             }
             """,
             headerText);
+        Assert.DoesNotContain("export enum", headerText);
     }
 
     [Fact]
@@ -232,6 +235,40 @@ public class HeaderEmitterTests
 
         Assert.True(KokosHeaderEmitter.TryBuildHeader(unit, checker, out var headerText));
         Assert.Contains("import function makePerson(): owned Person;", headerText);
+    }
+
+    [Fact]
+    public void An_inferred_void_return_type_is_written_as_void_not_unknown()
+    {
+        var (unit, checker) = Parse("export function f() { }");
+
+        Assert.True(KokosHeaderEmitter.TryBuildHeader(unit, checker, out var headerText));
+        Assert.Equal("import function f(): void;\n", headerText);
+    }
+
+    [Fact]
+    public void The_reported_example_matches_exactly_no_export_on_types_void_for_no_return_value()
+    {
+        var (unit, checker) = Parse(
+            """
+            module TestModule.Oof;
+
+            export type Vector3 = value (Int, Int, Int);
+
+            export function main() { }
+            """);
+
+        Assert.True(KokosHeaderEmitter.TryBuildHeader(unit, checker, out var headerText));
+        Assert.Equal(
+            """
+            module TestModule.Oof;
+
+            type Vector3 = value (Int, Int, Int);
+
+            import function main(): void;
+
+            """,
+            headerText);
     }
 
     [Fact]
