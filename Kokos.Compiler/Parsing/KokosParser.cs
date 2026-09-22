@@ -108,11 +108,10 @@ public sealed class KokosParser
         if (Current.Kind == TokenKind.ModuleKeyword)
             return ParseModuleDecl();
 
-        // Distinguishes a bare `import Foo.Bar;` namespace-import directive from `import function
-        // foo(...);`/`import(c) function foo(...);` (an external-function declaration) — both start
-        // with the same 'import' keyword, so the token right after it (an identifier starting a
-        // dotted path, vs. 'function'/'(') is what tells them apart.
-        if (Current.Kind == TokenKind.ImportKeyword && Peek(1).Kind == TokenKind.Identifier)
+        // 'import' is now *only* ever the namespace-import directive — a function declaration with no
+        // body (what 'import function'/'import(c) function' used to spell) is now just an ordinary
+        // function declaration ending in ';' instead of a block; see ParseFunctionDeclaration.
+        if (Current.Kind == TokenKind.ImportKeyword)
             return ParseImportDirective();
 
         // `export` alone doesn't say what kind of member follows (unlike `import`, it's valid on a
@@ -191,30 +190,30 @@ public sealed class KokosParser
     }
 
     /// <summary>
-    /// An optional leading <c>export</c>/<c>import</c> keyword (same "optional leading modifier"
-    /// pattern as <c>opaque type</c>/<c>value struct</c>) changes how the body is parsed: <c>import</c>
-    /// declares an existing native function with no body at all (just a trailing <c>;</c>); everything
-    /// else, including <c>export</c>, is an ordinary function with a real block body.
-    ///
-    /// That leading keyword may itself be followed by an ABI marker in parentheses, e.g.
-    /// <c>import(c)</c>/<c>export(c)</c> — see <see cref="KokosFunctionNode.IsCAbi"/>. Omitting it
-    /// (just <c>import</c>/<c>export</c> alone) means the Kokos ABI; only <c>c</c> is recognized today.
+    /// <c>export</c> and <c>abi(name)</c> are two fully independent, optional leading modifiers (in
+    /// that order) — see <see cref="KokosFunctionNode"/>'s own doc comment for what each means.
+    /// Whichever token follows the signature — <c>;</c> vs. <c>{</c> — decides definition vs. extern
+    /// declaration, regardless of which (if either) modifier was written: this is what makes a bare
+    /// <c>function foo();</c> (no modifiers at all) a legal extern declaration today, unlike the old
+    /// grammar where only <c>import</c> could introduce one.
     /// </summary>
     private KokosFunctionNode ParseFunctionDeclaration()
     {
-        var leadingKeyword = Current.Kind is TokenKind.ExportKeyword or TokenKind.ImportKeyword ? Advance() : null;
+        var exportKeyword = Current.Kind == TokenKind.ExportKeyword ? Advance() : null;
 
+        KokosToken? abiKeyword = null;
         KokosToken? abiOpenParen = null;
         KokosToken? abiName = null;
         KokosToken? abiCloseParen = null;
-        if (leadingKeyword is not null && Current.Kind == TokenKind.OpenParen)
+        if (Current.Kind == TokenKind.AbiKeyword)
         {
-            abiOpenParen = Advance();
+            abiKeyword = Advance();
+            abiOpenParen = Expect(TokenKind.OpenParen, "'('");
             abiName = Expect(TokenKind.Identifier, "an ABI name (e.g. 'c')");
             if (abiName.Text != "c")
             {
                 _diagnostics.ReportError(abiName.Span,
-                    $"Unknown ABI '{abiName.Text}' — only 'c' is supported (omit the '(...)' entirely for the default Kokos ABI).");
+                    $"Unknown ABI '{abiName.Text}' — only 'c' is supported (omit 'abi(...)' entirely for the default Kokos ABI).");
             }
 
             abiCloseParen = Expect(TokenKind.CloseParen, "')'");
@@ -236,12 +235,12 @@ public sealed class KokosParser
 
         KokosBlockNode? body = null;
         KokosToken? semicolon = null;
-        if (leadingKeyword?.Kind == TokenKind.ImportKeyword)
-            semicolon = Expect(TokenKind.Semicolon, "';'");
+        if (Current.Kind == TokenKind.Semicolon)
+            semicolon = Advance();
         else
             body = ParseBlock();
 
-        return new KokosFunctionNode(leadingKeyword, abiOpenParen, abiName, abiCloseParen, functionKeyword, name, openParen, parameters, closeParen, colon, returnType, body, semicolon);
+        return new KokosFunctionNode(exportKeyword, abiKeyword, abiOpenParen, abiName, abiCloseParen, functionKeyword, name, openParen, parameters, closeParen, colon, returnType, body, semicolon);
     }
 
     private KokosParameterNode ParseParameter()

@@ -1,4 +1,4 @@
-﻿using System.Linq;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using Kokos.Compiler.Diagnostics;
@@ -12,13 +12,13 @@ using Xunit;
 namespace Kokos.CodeGen.Tests;
 
 /// <summary>
-/// Unlike every other test in this project, these don't just assert on a tree or a diagnostic —
+/// Unlike every other test in this project, these don't just assert on a tree or a diagnostic �
 /// they parse, check, generate LLVM IR, JIT-compile it, and actually call the compiled function
 /// through a delegate, asserting on the real returned value. This is the concrete proof that the
 /// whole toolchain (LLVMSharp wiring, native libLLVM resolution, JIT execution) works end to end.
 /// </summary>
 // Marshal.GetDelegateForFunctionPointer rejects generic delegate types (even closed ones like
-// Func<long, long, long>) — it needs a concrete, non-generic delegate type per signature.
+// Func<long, long, long>) � it needs a concrete, non-generic delegate type per signature.
 public delegate long NullaryLongFunc();
 public delegate long UnaryLongFunc(long a);
 public delegate long UnaryPointerToLongFunc(nint pointer);
@@ -30,7 +30,7 @@ public delegate double BinaryDoubleFunc(double a, double b);
 public delegate int UnaryIntFunc(int a);
 
 // Not 'bool': .NET's default bool marshalling reads a full 4-byte "Win32 BOOL" from the return
-// register, but LLVM only guarantees the low byte (AL) is meaningful for an i1 return — the upper
+// register, but LLVM only guarantees the low byte (AL) is meaningful for an i1 return � the upper
 // bits are otherwise unspecified. Reading a 'byte' instead only ever looks at AL, which is exactly
 // what LLVM actually writes 0/1 into.
 public delegate byte NullaryByteFunc();
@@ -57,7 +57,7 @@ public class CodeGenTests
 
         KokosOptimizer.Optimize(module, optimizationLevel);
 
-        return KokosJit.Create(module, generator.Context, libraryPaths);
+        return KokosJit.Create(module, generator.Context, generator.StaticInitializerFunctionName, libraryPaths);
     }
 
     /// <summary>
@@ -84,10 +84,10 @@ public class CodeGenTests
         var generator = new KokosCodeGenerator(table, checker, "test_module");
         var module = generator.Generate(unit);
 
-        return KokosJit.Create(module, generator.Context, null);
+        return KokosJit.Create(module, generator.Context, generator.StaticInitializerFunctionName);
     }
 
-    /// <summary>The checked-in native fixture DLL's path — see Fixtures/native_fixture.c.</summary>
+    /// <summary>The checked-in native fixture DLL's path � see Fixtures/native_fixture.c.</summary>
     private static string NativeFixturePath => Path.Combine(AppContext.BaseDirectory, "Fixtures", "native_fixture.dll");
 
     [Fact]
@@ -184,7 +184,7 @@ public class CodeGenTests
     [Fact]
     public void ChooseOldest_shaped_function_picks_the_correct_value_for_both_orderings()
     {
-        // Structs aren't codegen'd yet (Phase F) — this captures the same two-branch, both-return
+        // Structs aren't codegen'd yet (Phase F) � this captures the same two-branch, both-return
         // shape as the memory-model spec's chooseOldest example, using plain Int parameters instead
         // of Person structs.
         using var jit = GenerateAndJit(
@@ -226,7 +226,7 @@ public class CodeGenTests
         Assert.Equal(0, sumUpTo(0));
     }
 
-    // The Phase C test proving modifiers are erased before codegen used `unowned Int`/`owned Int` —
+    // The Phase C test proving modifiers are erased before codegen used `unowned Int`/`owned Int` �
     // Phase D now correctly rejects a modifier on a value-shaped type like Int (placement
     // validation), so that test's premise no longer holds. There's no legal (validated) way to
     // exercise a modifier on a type codegen actually supports until struct/array codegen lands
@@ -235,7 +235,7 @@ public class CodeGenTests
     [Fact]
     public void Ternary_picks_the_correct_branch_in_both_directions()
     {
-        // The condition is computed and consumed entirely inside the JIT-compiled function — Bool
+        // The condition is computed and consumed entirely inside the JIT-compiled function � Bool
         // deliberately never crosses the native/managed call boundary as a parameter or return type
         // in this test file, since this hand-rolled IR has no Clang-style ABI lowering to guarantee
         // how a bare i1 argument would be marshaled by a plain delegate call.
@@ -320,10 +320,10 @@ public class CodeGenTests
     public void Self_referential_struct_type_generates_and_links_without_infinite_recursion()
     {
         // A genuinely cyclic/linked VALUE (e.g. a real linked list) needs a nullable "terminator"
-        // field (`next: unowned Node?`) to bootstrap — every field is mandatory at construction, so
+        // field (`next: unowned Node?`) to bootstrap � every field is mandatory at construction, so
         // there's no way to construct the first node of a chain without one, and optionals aren't
         // codegen'd yet (out of scope this phase). This instead proves the self-referential STRUCT
-        // TYPE itself — the type mapper's shell-then-fill pattern — resolves and generates valid,
+        // TYPE itself � the type mapper's shell-then-fill pattern � resolves and generates valid,
         // linkable IR when used purely as a field/parameter type.
         using var jit = GenerateAndJit(
             """
@@ -334,10 +334,10 @@ public class CodeGenTests
             }
             """);
 
-        // Resolving the symbol (without calling it — there's no valid Node pointer to pass from
+        // Resolving the symbol (without calling it � there's no valid Node pointer to pass from
         // .NET, per the scope note on struct/delegate boundaries) proves the function actually
         // linked successfully. 'unmanaged' (rather than the Phase D default 'unowned') is what makes
-        // this an export-legal signature at all, per the C-interop phase's boundary rule — it doesn't
+        // this an export-legal signature at all, per the C-interop phase's boundary rule � it doesn't
         // change what's being proven here, since the function is never actually called.
         jit.GetFunction<UnaryPointerToLongFunc>("readValue");
     }
@@ -345,7 +345,7 @@ public class CodeGenTests
     [Fact]
     public void Tuple_shaped_struct_with_unnamed_fields_constructs_and_accesses_by_position()
     {
-        // A genuine `type Pair = (Int, Int);` alias can't be used as a construction-call callee —
+        // A genuine `type Pair = (Int, Int);` alias can't be used as a construction-call callee �
         // that's a pre-existing gap in the checker (construction calls only resolve `struct`
         // declarations, not tuple type aliases), unrelated to codegen and out of scope here. A named
         // struct declaration with unnamed, positionally-accessed fields still exercises the same
@@ -474,7 +474,7 @@ public class CodeGenTests
     [Fact]
     public void Owned_argument_reborrowed_into_an_unowned_parameter_reads_the_correct_field()
     {
-        // readAge's parameter has no explicit modifier — it defaults to unowned (Phase D) — so
+        // readAge's parameter has no explicit modifier � it defaults to unowned (Phase D) � so
         // passing an owned local here exercises the reborrow conversion, not a plain pass-through.
         using var jit = GenerateAndJit(
             """
@@ -497,11 +497,11 @@ public class CodeGenTests
     public void A_freshly_constructed_argument_passed_as_unowned_is_automatically_freed_after_its_statement()
     {
         // The reported repro's shape: 'Person(age: 42)' is a fresh temporary, never bound to a name,
-        // passed straight into 'borrow's 'unowned' parameter — KokosTypeChecker no longer rejects this
+        // passed straight into 'borrow's 'unowned' parameter � KokosTypeChecker no longer rejects this
         // as an unrecoverable leak (see CheckNoLeakingWeakening/TryGetTemporaryReleases); instead the
         // compiler frees it itself right after the 'borrow(...)' statement finishes. 'watch' is an
         // independent unowned alias 'borrow' stashes it through, captured *before* that free, so
-        // 'destroyed(watch)' afterward is the concrete, end-to-end proof the free actually happened —
+        // 'destroyed(watch)' afterward is the concrete, end-to-end proof the free actually happened �
         // not just that the program compiled and didn't crash.
         using var jit = GenerateAndJit(
             """
@@ -570,11 +570,11 @@ public class CodeGenTests
     [Fact]
     public void Import_function_calls_a_real_C_runtime_function()
     {
-        // 'abs' is a real CRT symbol already loaded in the .NET host process — resolved the same way
+        // 'abs' is a real CRT symbol already loaded in the .NET host process � resolved the same way
         // KokosJit's process-symbol generator already resolves malloc/free/abort.
         using var jit = GenerateAndJit(
             """
-            import function abs(n: Int32): Int32;
+            function abs(n: Int32): Int32;
 
             export function myAbs(n: Int32): Int32 { return abs(n); }
             """);
@@ -587,12 +587,12 @@ public class CodeGenTests
     [Fact]
     public void Unmanaged_array_round_trips_through_a_real_C_function()
     {
-        // strlen takes a real null-terminated C string — 'unmanaged [UInt8]' is a bare pointer with
+        // strlen takes a real null-terminated C string � 'unmanaged [UInt8]' is a bare pointer with
         // no length field, exactly matching a raw char*. The exported function just forwards its own
         // raw pointer straight through to it.
         using var jit = GenerateAndJit(
             """
-            import function strlen(str: unmanaged [UInt8]): Int64;
+            function strlen(str: unmanaged [UInt8]): Int64;
 
             export function myStrlen(str: unmanaged [UInt8]): Int64 {
                 return strlen(str);
@@ -618,7 +618,7 @@ public class CodeGenTests
     public void Unmanaged_struct_pointer_as_an_export_parameter_reads_a_field_written_by_a_real_C_caller()
     {
         // No generation prefix: the raw buffer below is written exactly as a C caller passing a
-        // 'Person*' would lay it out — the concrete proof 'unmanaged' strips the envelope correctly.
+        // 'Person*' would lay it out � the concrete proof 'unmanaged' strips the envelope correctly.
         using var jit = GenerateAndJit(
             """
             struct Person { age: Int }
@@ -797,7 +797,7 @@ public class CodeGenTests
     {
         using var jit = GenerateAndJit(
             """
-            import function strlen(str: unmanaged [Int8]): Int64;
+            function strlen(str: unmanaged [Int8]): Int64;
 
             export function f(): Int64 {
                 let s = "hello";
@@ -814,13 +814,13 @@ public class CodeGenTests
     public void Unmanaged_modifier_behind_a_transparent_alias_applies_at_a_plain_parameter_site()
     {
         // 'CString' bakes 'unmanaged' into its own definition; 'puts' below never writes the
-        // modifier itself — it must still compile to a bare-pointer C signature, not the default
+        // modifier itself � it must still compile to a bare-pointer C signature, not the default
         // 'unowned' reference-pair a plain, unmodified parameter type would otherwise get.
         using var jit = GenerateAndJit(
             """
             type CString = unmanaged [Int8];
 
-            import function strlen(str: CString): Int64;
+            function strlen(str: CString): Int64;
 
             export function f(): Int64 {
                 let s = "hello";
@@ -1004,7 +1004,7 @@ public class CodeGenTests
     {
         // The exact reported repro: overriding an owned static must free its previous value (rather
         // than silently leaking it), and moving a static's value out into a local (`let l = person;`)
-        // must correctly release that local at the end of its function — which requires an optional's
+        // must correctly release that local at the end of its function � which requires an optional's
         // envelope representation to actually exist (KokosLlvmTypeMapper.MapBody previously threw for
         // KokosOptionalType). Neither behavior can be observed directly from a return value here (no
         // leak/free detector), but this at minimum proves both code paths compile and run without
@@ -1067,7 +1067,7 @@ public class CodeGenTests
     public void Optimizing_the_owned_static_reassignment_repro_preserves_its_result(KokosOptimizationLevel level)
     {
         // Same repro as Reassigning_an_owned_pointer_shaped_optional_static_releases_its_previous_value
-        // — the release-before-overwrite codegen (malloc/free calls, null-guard branches) has to
+        // � the release-before-overwrite codegen (malloc/free calls, null-guard branches) has to
         // survive the optimizer's inlining/DCE passes without the JIT-ed result changing.
         using var jit = GenerateAndJit(
             """
@@ -1126,7 +1126,7 @@ public class CodeGenTests
     public void Optimizing_at_O2_actually_changes_the_generated_IR()
     {
         // A deliberately unoptimized-looking function (`x + 0`, always simplified away by even the
-        // most basic pass pipeline) — the concrete proof that '-O2' really does run real LLVM passes
+        // most basic pass pipeline) � the concrete proof that '-O2' really does run real LLVM passes
         // over the module rather than silently no-op-ing.
         var (module, generator) = GenerateModule("export function f(x: Int): Int { return x + 0; }");
         try
@@ -1150,7 +1150,7 @@ public class CodeGenTests
         // Regression test: LLVM's optimizer recognizes a direct call to '@free' (matching libc's name
         // via TargetLibraryInfo) and, once it can prove the freed allocation doesn't escape (a
         // non-capturing 'unmanaged' C import like this one doesn't retain the pointer), treats the
-        // whole allocation as a non-escaping heap object it's free to delete entirely — including the
+        // whole allocation as a non-escaping heap object it's free to delete entirely � including the
         // 'free' call itself, since C's memory model treats a missed deallocation as merely a leak,
         // not a correctness violation. That's wrong for Kokos: 'owned' is supposed to guarantee
         // deterministic release. KokosCodeGenerator routes every release through a `noinline`
@@ -1158,7 +1158,7 @@ public class CodeGenTests
         // that wrapper call is still present (and 'free' is still reachable through it) after '-O2'.
         var (module, generator) = GenerateModule(
             """
-            import(c) function puts(str: unmanaged [Int8]): Int;
+            abi(c) function puts(str: unmanaged [Int8]): Int;
 
             export function main() {
                 let l: Int8 = 0;
@@ -1182,7 +1182,7 @@ public class CodeGenTests
         }
     }
 
-    private static (LLVMModuleRef Module, KokosCodeGenerator Generator) GenerateModule(string source)
+    private static (LLVMModuleRef Module, KokosCodeGenerator Generator) GenerateModule(string source, string moduleName = "test_module")
     {
         var unit = KokosParser.Parse(source, out _);
         var diagnostics = new KokosDiagnosticBag();
@@ -1192,7 +1192,7 @@ public class CodeGenTests
         checker.VisitCompilationUnit(unit);
         Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
 
-        var generator = new KokosCodeGenerator(table, checker, "test_module");
+        var generator = new KokosCodeGenerator(table, checker, moduleName);
         return (generator.Generate(unit), generator);
     }
 
@@ -1216,7 +1216,7 @@ public class CodeGenTests
     {
         // Regression test for the fat-pointer array redesign: an array is now a single `malloc`'d heap
         // block (generation + inline elements together), not an envelope pointing at a separately
-        // allocated element buffer — so releasing an owned array should free exactly one allocation.
+        // allocated element buffer � so releasing an owned array should free exactly one allocation.
         var (module, generator) = GenerateModule(
             """
             export function main(): Int {
@@ -1264,7 +1264,7 @@ public class CodeGenTests
     {
         // Control case: a struct's fields live inline in the same allocation as its generation
         // header (no separate buffer indirection like an array has), so exactly one release is
-        // correct here — this pins down that EmitRelease's array-vs-struct branch doesn't
+        // correct here � this pins down that EmitRelease's array-vs-struct branch doesn't
         // over-fire for the type it was never supposed to touch.
         var (module, generator) = GenerateModule(
             """
@@ -1296,7 +1296,7 @@ public class CodeGenTests
         // pointer used to have no length field at all (the length was compile-time-only), a genuinely
         // different shape from a dynamic array's. Both are now the exact same by-value
         // `{ i64 capturedGen, i64 len, ptr }` over an identically-shaped `{ i64 gen, [0 x T] }` heap
-        // block — this asserts both the fat pointer's own aggregate type and the heap block's malloc
+        // block � this asserts both the fat pointer's own aggregate type and the heap block's malloc
         // size computation are textually identical between the two.
         var (fixedModule, fixedGenerator) = GenerateModule(
             """
@@ -1336,7 +1336,7 @@ public class CodeGenTests
     {
         // Since a fixed-length and a dynamic array now share bit-identical representation at every
         // ownership level, the spec's implicit `[T # N] -> [T]` widening is a pure relabeling with no
-        // codegen at all (see ConvertOwnership's doc comment) — exactly one malloc total (the single
+        // codegen at all (see ConvertOwnership's doc comment) � exactly one malloc total (the single
         // heap block backing 'fixedArr'), not two from a second block being built for the widened
         // binding.
         var (module, generator) = GenerateModule(
@@ -1397,7 +1397,7 @@ public class CodeGenTests
     {
         // Regression test for the fat-pointer array redesign: owned/unowned/manual are now the exact
         // same by-value shape for an array (unlike a reference struct, which still genuinely reborrows
-        // — see ConvertOwnership), so converting an owned array to unowned should compile to a plain
+        // � see ConvertOwnership), so converting an owned array to unowned should compile to a plain
         // SSA value flowing through unchanged, never an insertvalue/extractvalue pair building a
         // {pointer, capturedGeneration} reborrow the way a struct's does.
         var (module, generator) = GenerateModule(
@@ -1427,9 +1427,9 @@ public class CodeGenTests
     public void A_fixed_length_arrays_length_access_goes_through_the_captured_fat_pointer_field()
     {
         // Per the redesign's intent: a fixed-length array's length lives in the fat pointer's own
-        // captured 'len' field (index 1) — read the same way a dynamic array's is (extractvalue on the
+        // captured 'len' field (index 1) � read the same way a dynamic array's is (extractvalue on the
         // in-hand aggregate), never hard-coded as a bare LLVM constant at the '.length' access site
-        // itself (codegen never special-cases FixedLength here at all — see LoadArrayLength). Whether
+        // itself (codegen never special-cases FixedLength here at all � see LoadArrayLength). Whether
         // the optimizer can later fold the whole thing back to a literal is a separate concern this
         // test doesn't need to prove.
         var (module, generator) = GenerateModule(
@@ -1456,7 +1456,7 @@ public class CodeGenTests
     public void An_optional_array_defaults_to_null_and_round_trips_through_reassignment_and_unwrap()
     {
         // A pointer-shaped optional array reuses the by-value fat pointer's own shape (see
-        // KokosOptionalType.ReusesInnerPointer / KokosLlvmTypeMapper.Map) — "no value" is a
+        // KokosOptionalType.ReusesInnerPointer / KokosLlvmTypeMapper.Map) � "no value" is a
         // zeroed-out fat pointer whose shared heap block field is null, not a null fat pointer itself
         // (it isn't a pointer at all any more). This exercises the whole lifecycle: null default,
         // '== null', reassignment, and '!' force-unwrap through both '.length' and indexing.
@@ -1549,11 +1549,11 @@ public class CodeGenTests
     public void A_named_tuple_literal_against_a_declared_return_type_round_trips_through_field_access()
     {
         // The reported repro: a reference tuple type built and returned with no explicit ownership
-        // modifier on the declared return type — this also regression-tests the return-ownership
+        // modifier on the declared return type � this also regression-tests the return-ownership
         // positional default fix (an unannotated pointer-shaped return type now defaults to 'owned',
         // the same way a parameter/field already does, instead of leaving it 'Inferred' and crashing
         // codegen the moment the result is dereferenced). The literal is named ('status: 100, flag:
-        // true'), not positional — '(status: UInt64, flag: Bool)' declares no explicit field index, so
+        // true'), not positional � '(status: UInt64, flag: Bool)' declares no explicit field index, so
         // it doesn't support positional construction (see CheckConstruction).
         using var jit = GenerateAndJit(
             """
@@ -1625,7 +1625,7 @@ public class CodeGenTests
     [Fact]
     public void A_non_exported_function_in_one_file_is_callable_from_another_files_body()
     {
-        // "even non-exported functions are available in other files inside the same module" — the
+        // "even non-exported functions are available in other files inside the same module" � the
         // reported requirement, verified end to end: both files compile into one LLVM module, and
         // 'helper' (never 'export'-marked, so 'internal' LLVM linkage) is still directly callable from
         // 'main' in the other file, since 'internal' only restricts visibility *outside* the module.
@@ -1668,7 +1668,7 @@ public class CodeGenTests
     {
         // Construction (not a function call, to avoid a separate pre-existing issue where a function
         // referenced from a static initializer trips CheckFunctionCore's own blanket "every function
-        // sees every static" re-entrancy — orthogonal to multi-file compilation, since it already
+        // sees every static" re-entrancy � orthogonal to multi-file compilation, since it already
         // reproduces in single-file source too) still exercises the exact same context-swap: 'Config'
         // must resolve under 'total's own file's imports.
         using var jit = GenerateAndJitMultiFile(
@@ -1694,6 +1694,48 @@ public class CodeGenTests
         Assert.Equal(101, main());
     }
 
+    [Fact]
+    public void Two_namespaces_declaring_the_same_short_function_name_call_the_correct_one()
+    {
+        // Without namespace mangling, 'f' compiled into one LLVM module from two different files would
+        // collide outright (the second AddFunction/DeclareFunction would silently reuse — or crash
+        // resolving — whichever LLVM function already exists under the bare name 'f'). Mangling by
+        // each function's own declared namespace ('NsA.f' / 'NsB.f') is what makes this legal and
+        // correct at all.
+        using var jit = GenerateAndJitMultiFile(
+            """
+            module NsA;
+            function f(): Int { return 1; }
+            export function callA(): Int { return f(); }
+            """,
+            """
+            module NsB;
+            function f(): Int { return 2; }
+            export function callB(): Int { return f(); }
+            """);
+
+        // callA/callB are themselves namespaced (mangled), same as f — only a function in the global
+        // namespace (no 'module' declaration) keeps its bare, unmangled name.
+        var callA = jit.GetFunction<NullaryLongFunc>("NsA.callA");
+        var callB = jit.GetFunction<NullaryLongFunc>("NsB.callB");
+
+        Assert.Equal(1, callA());
+        Assert.Equal(2, callB());
+    }
+
+    [Fact]
+    public void Two_modules_have_distinct_static_initializer_symbol_names()
+    {
+        // Direct regression check for the collision this whole feature exists to fix: every
+        // separately-compiled module used to emit the exact same 'kokos.init_statics' symbol,
+        // regardless of the module's own name.
+        var (_, generatorA) = GenerateModule("static let x: Int = 1;", "lib_a");
+        var (_, generatorB) = GenerateModule("static let x: Int = 2;", "lib_b");
+
+        Assert.Equal("lib_a.kokos.init_statics", generatorA.StaticInitializerFunctionName);
+        Assert.Equal("lib_b.kokos.init_statics", generatorB.StaticInitializerFunctionName);
+    }
+
     // --- Object file emission (`KokosObjectEmitter`) ------------------------------------------------
 
     [Fact]
@@ -1707,7 +1749,7 @@ public class CodeGenTests
 
             Assert.True(File.Exists(path));
 
-            // A COFF object's first two bytes are its machine-type field — 0x8664 (little-endian) is
+            // A COFF object's first two bytes are its machine-type field � 0x8664 (little-endian) is
             // IMAGE_FILE_MACHINE_AMD64, confirming this is a real, host-targeted object file rather
             // than an empty or garbage one, without needing an external linker just to sanity-check it.
             var header = new byte[2];
@@ -1727,7 +1769,7 @@ public class CodeGenTests
     [Fact]
     public void Emitting_an_object_file_does_not_require_a_main_function()
     {
-        // A module meant to be linked into a C program has no reason to have a Kokos 'main' — object
+        // A module meant to be linked into a C program has no reason to have a Kokos 'main' � object
         // emission must not carry over KokosJit/the CLI's "needs an exported main" assumption.
         var (module, generator) = GenerateModule("export function helper(x: Int): Int { return x * 2; }");
         var path = Path.Combine(Path.GetTempPath(), $"kokos_test_{Guid.NewGuid():N}.obj");
@@ -1752,12 +1794,12 @@ public class CodeGenTests
     public void Calling_an_imported_function_without_loading_its_library_fails_to_resolve()
     {
         // The unresolved symbol's own name ends up on LLVM's default error reporter (stderr), not in
-        // this exception's message — see KokosJit.Create's doc comment on why this fails as early as
+        // this exception's message � see KokosJit.Create's doc comment on why this fails as early as
         // construction (the whole module fails to materialize its very first requested symbol,
         // 'kokos.init_statics', once anything in it references an unresolvable import).
         var ex = Assert.Throws<InvalidOperationException>(() => GenerateAndJit(
             """
-            import function kokos_test_triple(x: Int): Int;
+            function kokos_test_triple(x: Int): Int;
 
             export function main(): Int { return kokos_test_triple(14); }
             """));
@@ -1770,7 +1812,7 @@ public class CodeGenTests
     {
         using var jit = GenerateAndJit(
             """
-            import function kokos_test_triple(x: Int): Int;
+            function kokos_test_triple(x: Int): Int;
 
             export function main(): Int { return kokos_test_triple(14); }
             """,
@@ -1813,7 +1855,7 @@ public class CodeGenTests
     [Fact]
     public void A_suffixed_literal_produces_a_value_of_its_exact_width_and_sign()
     {
-        // 200 doesn't fit in a signed Int8 but does fit in UInt8 — if the suffix were ignored and
+        // 200 doesn't fit in a signed Int8 but does fit in UInt8 � if the suffix were ignored and
         // this literal were instead contextually inferred as the default 'Int', 200 would still be
         // fine, so this specifically exercises that 'u8' really does drive an 8-bit unsigned store.
         using var jit = GenerateAndJit(

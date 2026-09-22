@@ -18,13 +18,14 @@ namespace Kokos.Compiler.Formatting;
 /// same way for a consistent, deliberate "this is my public interface" story rather than dumping every
 /// internal implementation-detail type into the header too.
 ///
-/// A function becomes a bodyless <c>import function</c> declaration (the existing syntax for "this
+/// A function becomes a bodyless declaration (a function with no body is already, by itself, "this
 /// symbol is defined elsewhere" — exactly what it now is, from the header's own consumer's point of
-/// view) with its body/leading `export`/`export(c)` replaced by `import`/`import(c)`. A struct/enum/
-/// type-alias is copied through with its own `export` keyword dropped: this header is meant to be
-/// dropped straight into a downstream project's own sources and compiled there directly, so it's
-/// declaring these types itself, not re-exporting someone else's — keeping `export` on would mark them
-/// as *that* project's own public interface too, which was never asked for.
+/// view) with its body and any `export` dropped; its `abi(...)` marker (if any) carries over unchanged,
+/// since it describes the calling convention, not who's exporting vs. importing it. A struct/enum/
+/// type-alias is copied through with its own `export` keyword dropped the same way: this header is
+/// meant to be dropped straight into a downstream project's own sources and compiled there directly, so
+/// it's declaring these things itself, not re-exporting someone else's — keeping `export` on would mark
+/// them as *that* project's own public interface too, which was never asked for.
 /// </summary>
 public static class KokosHeaderEmitter
 {
@@ -55,7 +56,7 @@ public static class KokosHeaderEmitter
             switch (member)
             {
                 case KokosFunctionNode { IsExported: true } function:
-                    sections.Add(FormatFunctionAsImportDeclaration(function, formatter, checker));
+                    sections.Add(FormatFunctionAsExternDeclaration(function, formatter, checker));
                     break;
 
                 case KokosTypeAliasNode { IsExported: true } or KokosEnumDeclNode { IsExported: true } or KokosStructDeclNode { IsExported: true }:
@@ -89,19 +90,20 @@ public static class KokosHeaderEmitter
 
     /// <summary>
     /// Mirrors <see cref="KokosFormatter.VisitFunction"/>'s own parameter/return-type formatting
-    /// exactly, but always renders as a bodyless `import`/`import(c)` declaration regardless of
-    /// whether the source used a plain `export` or `export(c)` — the ABI marker (if any) carries over
-    /// unchanged, since it describes the calling convention, not who's exporting vs. importing it.
+    /// exactly, but always renders as a bodyless declaration (dropping any body and any `export`)
+    /// regardless of whether the source function had one of its own — a header declaration is always
+    /// body-less already, so there's nothing to strip when the source was already extern, and the
+    /// `abi(...)` marker (if any) carries over unchanged either way.
     /// </summary>
-    private static string FormatFunctionAsImportDeclaration(KokosFunctionNode node, KokosFormatter formatter, KokosTypeChecker checker)
+    private static string FormatFunctionAsExternDeclaration(KokosFunctionNode node, KokosFormatter formatter, KokosTypeChecker checker)
     {
-        var abi = node.AbiNameToken is null ? "" : $"({node.AbiNameToken.Text})";
+        var abi = node.AbiKeyword is null ? "" : $"abi({node.AbiNameToken!.Text}) ";
         var parameters = string.Join(", ", node.Parameters.Items.Select(p => p.Accept(formatter)));
-        return $"import{abi} function {node.Name}({parameters}): {FormatReturnType(node, formatter, checker)};";
+        return $"{abi}function {node.Name}({parameters}): {FormatReturnType(node, formatter, checker)};";
     }
 
     /// <summary>
-    /// A header's `import function` declaration always states its return type explicitly, even when
+    /// A header's extern function declaration always states its return type explicitly, even when
     /// the original source left it to inference — the header is all a downstream compilation ever
     /// sees, and inference has nothing to run there (there's no body). When the source did write a
     /// return type, that written syntax is reused verbatim; otherwise it's rebuilt from the checker's

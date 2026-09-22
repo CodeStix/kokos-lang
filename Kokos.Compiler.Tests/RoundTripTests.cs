@@ -205,10 +205,12 @@ public class RoundTripTests
             function f() {
             }
             """];
-        // 'import' still means the existing external-function declaration when followed by
-        // 'function'/'(' rather than a bare identifier — this must keep parsing exactly as before.
-        yield return ["import function puts(str: CString): Int;"];
-        yield return ["import(c) function puts(str: CString): Int;"];
+        // A body-less function is an extern declaration regardless of any modifier — 'abi(c)' opts out
+        // of Kokos name mangling for real C interop; omitting it means the (mangled) Kokos ABI.
+        yield return ["function puts(str: CString): Int;"];
+        yield return ["abi(c) function puts(str: CString): Int;"];
+        yield return ["export function puts(str: CString): Int;"];
+        yield return ["export abi(c) function puts(str: CString): Int;"];
 
         // 'export' on a type alias/enum/struct declaration (for KokosHeaderEmitter — see
         // Kokos/Program.cs's '--emit-object' handling).
@@ -235,7 +237,7 @@ public class RoundTripTests
 
         // 'void' as an explicit return-type annotation.
         yield return ["function f(): void { return; }"];
-        yield return ["import function puts(str: CString): void;"];
+        yield return ["function puts(str: CString): void;"];
     }
 
     [Theory]

@@ -3,12 +3,10 @@ namespace Kokos.Compiler.Syntax.Nodes;
 /// <summary>
 /// A file-level <c>import Foo.Bar;</c> directive, making namespace <c>Foo.Bar</c>'s declarations
 /// (from every file that declares <c>module Foo.Bar;</c>) visible in this file — see
-/// <see cref="KokosModuleDeclNode"/> and <c>KokosDeclarationTable</c>. Distinct from
-/// <c>import function foo(...);</c>/<c>import(c) function foo(...);</c> (an external-function
-/// declaration — see <see cref="KokosFunctionNode"/>), which shares the same leading <c>import</c>
-/// keyword but is disambiguated at parse time by what follows it (<c>function</c>/<c>(</c> for the
-/// function form, a bare identifier — the start of a dotted namespace path — for this one). A
-/// <see cref="KokosMemberNode"/> purely so it can sit directly in
+/// <see cref="KokosModuleDeclNode"/> and <c>KokosDeclarationTable</c>. <c>import</c> is now *only*
+/// ever this namespace-import directive — an external-function declaration (see
+/// <see cref="KokosFunctionNode"/>) no longer shares this keyword; it's just an ordinary function
+/// declaration with no body. A <see cref="KokosMemberNode"/> purely so it can sit directly in
 /// <see cref="KokosCompilationUnitNode.Members"/> alongside everything else; it declares no named
 /// symbol of its own.
 /// </summary>

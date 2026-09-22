@@ -106,6 +106,7 @@ internal class Program
         // a module meant to be linked into a C program has no reason to have a Kokos 'main' at all, so
         // that requirement only applies once we actually intend to JIT and run it below.
         KokosFunctionType? mainType = null;
+        KokosFunctionNode? mainNode = null;
         if (emitObjectPath is null)
         {
             var mainEntry = checker.FunctionTypes.FirstOrDefault(entry => entry.Key.Name == "main");
@@ -131,6 +132,7 @@ internal class Program
             }
 
             mainType = mainEntry.Value;
+            mainNode = mainEntry.Key;
         }
 
         try
@@ -158,10 +160,10 @@ internal class Program
                 return 0;
             }
 
-            using var jit = KokosJit.Create(module, generator.Context, libraryPaths);
+            using var jit = KokosJit.Create(module, generator.Context, generator.StaticInitializerFunctionName, libraryPaths);
 
             Console.WriteLine("=== Running ===");
-            RunMain(jit, mainType!.ReturnType);
+            RunMain(jit, generator.GetFunctionSymbolName(mainNode!), mainType!.ReturnType);
         }
         catch (Exception ex) when (ex is NotSupportedException or InvalidOperationException)
         {
@@ -277,20 +279,22 @@ internal class Program
         return false;
     }
 
-    private static void RunMain(KokosJit jit, KokosType returnType)
+    // 'main's own compiled symbol may be namespace-mangled (e.g. "TestModule.Oof.main") — never assume
+    // it's the bare "main" JIT-side, even though that's the only name Kokos source itself ever spells.
+    private static void RunMain(KokosJit jit, string mainSymbolName, KokosType returnType)
     {
         switch (returnType)
         {
             case KokosVoidType:
-                jit.GetFunction<Action>("main")();
+                jit.GetFunction<Action>(mainSymbolName)();
                 break;
 
             case KokosBoolType:
-                Console.WriteLine(jit.GetFunction<NullaryBoolFunc>("main")());
+                Console.WriteLine(jit.GetFunction<NullaryBoolFunc>(mainSymbolName)());
                 break;
 
             case KokosPrimitiveType primitive:
-                Console.WriteLine(RunPrimitiveMain(jit, primitive.Kind));
+                Console.WriteLine(RunPrimitiveMain(jit, mainSymbolName, primitive.Kind));
                 break;
 
             default:
@@ -300,18 +304,18 @@ internal class Program
 
     // Marshal.GetDelegateForFunctionPointer rejects generic delegate types (Func<T>/Action<T>), so
     // every shape 'main' can return needs its own concrete, non-generic delegate here.
-    private static object RunPrimitiveMain(KokosJit jit, KokosPrimitiveKind kind) => kind switch
+    private static object RunPrimitiveMain(KokosJit jit, string mainSymbolName, KokosPrimitiveKind kind) => kind switch
     {
-        KokosPrimitiveKind.Int or KokosPrimitiveKind.Int64 => jit.GetFunction<NullaryLongFunc>("main")(),
-        KokosPrimitiveKind.UInt or KokosPrimitiveKind.UInt64 => jit.GetFunction<NullaryULongFunc>("main")(),
-        KokosPrimitiveKind.Int32 => jit.GetFunction<NullaryIntFunc>("main")(),
-        KokosPrimitiveKind.UInt32 => jit.GetFunction<NullaryUIntFunc>("main")(),
-        KokosPrimitiveKind.Int16 => jit.GetFunction<NullaryShortFunc>("main")(),
-        KokosPrimitiveKind.UInt16 => jit.GetFunction<NullaryUShortFunc>("main")(),
-        KokosPrimitiveKind.Int8 => jit.GetFunction<NullarySByteFunc>("main")(),
-        KokosPrimitiveKind.UInt8 => jit.GetFunction<NullaryByteFunc>("main")(),
-        KokosPrimitiveKind.Float or KokosPrimitiveKind.Float64 => jit.GetFunction<NullaryDoubleFunc>("main")(),
-        KokosPrimitiveKind.Float32 => jit.GetFunction<NullaryFloatFunc>("main")(),
+        KokosPrimitiveKind.Int or KokosPrimitiveKind.Int64 => jit.GetFunction<NullaryLongFunc>(mainSymbolName)(),
+        KokosPrimitiveKind.UInt or KokosPrimitiveKind.UInt64 => jit.GetFunction<NullaryULongFunc>(mainSymbolName)(),
+        KokosPrimitiveKind.Int32 => jit.GetFunction<NullaryIntFunc>(mainSymbolName)(),
+        KokosPrimitiveKind.UInt32 => jit.GetFunction<NullaryUIntFunc>(mainSymbolName)(),
+        KokosPrimitiveKind.Int16 => jit.GetFunction<NullaryShortFunc>(mainSymbolName)(),
+        KokosPrimitiveKind.UInt16 => jit.GetFunction<NullaryUShortFunc>(mainSymbolName)(),
+        KokosPrimitiveKind.Int8 => jit.GetFunction<NullarySByteFunc>(mainSymbolName)(),
+        KokosPrimitiveKind.UInt8 => jit.GetFunction<NullaryByteFunc>(mainSymbolName)(),
+        KokosPrimitiveKind.Float or KokosPrimitiveKind.Float64 => jit.GetFunction<NullaryDoubleFunc>(mainSymbolName)(),
+        KokosPrimitiveKind.Float32 => jit.GetFunction<NullaryFloatFunc>(mainSymbolName)(),
         _ => throw new ArgumentOutOfRangeException(nameof(kind)),
     };
 

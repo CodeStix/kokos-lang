@@ -4,8 +4,8 @@ export type String = readonly [Int8];
 
 export type CString = unmanaged [Int8];
 
-import(c) function puts(str: CString);
-import(c) function gets(str: CString);
+abi(c) function puts(str: CString);
+abi(c) function gets(str: CString);
 
 export function print(str: String) {
     puts(str);

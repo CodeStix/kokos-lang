@@ -672,8 +672,8 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
 
         try
         {
-            // An `import function` declares an existing native function with no body to check at all —
-            // its parameter/return shapes were already resolved above (body-independent), so there's
+            // A body-less function declares an existing function with no body to check at all — its
+            // parameter/return shapes were already resolved above (body-independent), so there's
             // nothing here to infer, no move-checking to do (no locals), and nothing to release.
             if (node.IsImported)
             {
@@ -728,14 +728,14 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
     }
 
     /// <summary>
-    /// The signature rule for a C-ABI `import(c)`/`export(c)` (see
+    /// The signature rule for a C-ABI `abi(c)` function (see
     /// <see cref="KokosFunctionNode.IsCAbi"/>): every parameter and the return must be something the
     /// platform C calling convention already handles correctly with no extra ABI-lowering work — a
     /// primitive/`Bool` passed by value, or a pointer-shaped type with `unmanaged` ownership. Rejects
     /// `owned`/`unowned`/`manual` (generation-tracked shapes C knows nothing about) and any by-value
     /// struct/array (real C-ABI aggregate classification is a separate future phase).
     ///
-    /// A plain `import`/`export` (no `(c)`) skips this entirely — it's understood to link only
+    /// A function with no `abi(...)` marker skips this entirely — it's understood to link only
     /// against another Kokos-compiled module, which agrees with this one on every internal
     /// representation (generation-tracked references included), so nothing here applies.
     /// </summary>

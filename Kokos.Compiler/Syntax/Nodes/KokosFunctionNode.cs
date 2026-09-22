@@ -1,23 +1,34 @@
 namespace Kokos.Compiler.Syntax.Nodes;
 
 /// <summary>
-/// A function declaration: <c>function name(params): ReturnType { body }</c>. The return type
-/// annotation is optional in the grammar (<see cref="ColonToken"/>/<see cref="ReturnType"/> are
-/// both null when omitted).
+/// A function declaration: <c>[export] [abi(name)] function name(params): ReturnType { body }</c>.
+/// The return type annotation is optional in the grammar (<see cref="ColonToken"/>/<see cref="ReturnType"/>
+/// are both null when omitted).
 ///
-/// An optional leading <see cref="LeadingKeyword"/> (<c>export</c>/<c>import</c>) changes the shape
-/// of what follows: an <c>import</c> function declares an existing native function with no body at
-/// all — <see cref="Body"/> is null and <see cref="SemicolonToken"/> takes its place instead. Every
-/// other function (plain, or <c>export</c>) always has a real <see cref="Body"/> and a null
-/// <see cref="SemicolonToken"/>.
-///
-/// <see cref="LeadingKeyword"/> may itself carry an ABI marker in parentheses — <c>import(c)</c>/
-/// <c>export(c)</c> — see <see cref="IsCAbi"/>. Only meaningful alongside a leading keyword; a plain
-/// function has no ABI tokens at all.
+/// <see cref="ExportKeyword"/> and the <see cref="AbiKeyword"/> marker are two fully independent,
+/// orthogonal modifiers — unlike the old <c>import</c>/<c>export</c>/<c>(c)</c> scheme this replaces:
+/// <list type="bullet">
+/// <item>Whether this declaration has a real body — not any leading keyword — decides definition vs.
+/// extern reference: <see cref="Body"/> is null exactly when <see cref="SemicolonToken"/> terminates
+/// the declaration instead (what a bare <c>import function</c> used to mean). This is legal with or
+/// without <see cref="ExportKeyword"/> present.</item>
+/// <item><see cref="ExportKeyword"/> marks this as part of the file's public interface — real external
+/// LLVM linkage for a definition, and/or eligibility for <c>KokosHeaderEmitter</c> to include it in a
+/// generated header. Now legal on a body-less declaration too: a "re-export," forwarding an extern
+/// symbol through this file's own header — impossible under the old mutually-exclusive
+/// <c>import</c>/<c>export</c> leading-keyword scheme.</item>
+/// <item><see cref="AbiKeyword"/> (always paired with <see cref="AbiOpenParenToken"/>/
+/// <see cref="AbiNameToken"/>/<see cref="AbiCloseParenToken"/> when present — see
+/// <see cref="IsCAbi"/>) opts this function's compiled symbol out of Kokos's own namespace-based name
+/// mangling, using its raw, literal name instead — the escape hatch for real C interop (e.g. <c>puts</c>,
+/// <c>malloc</c>). Legal with or without a body, with or without <see cref="ExportKeyword"/>. Omitted
+/// entirely for the default (mangled) Kokos ABI.</item>
+/// </list>
 /// </summary>
 public sealed class KokosFunctionNode : KokosMemberNode
 {
-    public KokosToken? LeadingKeyword { get; }
+    public KokosToken? ExportKeyword { get; }
+    public KokosToken? AbiKeyword { get; }
     public KokosToken? AbiOpenParenToken { get; }
     public KokosToken? AbiNameToken { get; }
     public KokosToken? AbiCloseParenToken { get; }
@@ -32,20 +43,23 @@ public sealed class KokosFunctionNode : KokosMemberNode
     public KokosBlockNode? Body { get; }
     public KokosToken? SemicolonToken { get; }
 
-    public bool IsExported => LeadingKeyword?.Kind == TokenKind.ExportKeyword;
-    public bool IsImported => LeadingKeyword?.Kind == TokenKind.ImportKeyword;
+    public bool IsExported => ExportKeyword is not null;
+
+    /// <summary>An extern reference (no body) rather than a real definition — the exact same meaning <c>import</c>/<c>import(c)</c> used to carry, now driven purely by body-presence instead of a leading keyword.</summary>
+    public bool IsImported => Body is null;
 
     /// <summary>
-    /// True when this import/export explicitly declares the C ABI via <c>(c)</c> — every parameter
+    /// True when this declaration explicitly opts into the C ABI via <c>abi(c)</c> — every parameter
     /// and the return must then be C-calling-convention-compatible (see
-    /// <c>KokosTypeChecker.CheckCBoundarySignature</c>). False (the default — no <c>(...)</c> at all)
-    /// means the Kokos ABI: any type Kokos itself can represent may cross this boundary, since it's
-    /// understood to link only against another Kokos-compiled module, not arbitrary C code.
+    /// <c>KokosTypeChecker.CheckCBoundarySignature</c>), and its compiled symbol keeps its raw,
+    /// unmangled name. False (the default — no <c>abi(...)</c> at all) means the Kokos ABI: any type
+    /// Kokos itself can represent may cross this boundary, and the compiled symbol is namespace-mangled.
     /// </summary>
     public bool IsCAbi => AbiNameToken?.Text == "c";
 
     public KokosFunctionNode(
-        KokosToken? leadingKeyword,
+        KokosToken? exportKeyword,
+        KokosToken? abiKeyword,
         KokosToken? abiOpenParenToken,
         KokosToken? abiNameToken,
         KokosToken? abiCloseParenToken,
@@ -59,7 +73,8 @@ public sealed class KokosFunctionNode : KokosMemberNode
         KokosBlockNode? body,
         KokosToken? semicolonToken)
     {
-        LeadingKeyword = leadingKeyword;
+        ExportKeyword = exportKeyword;
+        AbiKeyword = abiKeyword;
         AbiOpenParenToken = abiOpenParenToken;
         AbiNameToken = abiNameToken;
         AbiCloseParenToken = abiCloseParenToken;
@@ -73,7 +88,8 @@ public sealed class KokosFunctionNode : KokosMemberNode
         Body = body;
         SemicolonToken = semicolonToken;
 
-        AddChild(leadingKeyword);
+        AddChild(exportKeyword);
+        AddChild(abiKeyword);
         AddChild(abiOpenParenToken);
         AddChild(abiNameToken);
         AddChild(abiCloseParenToken);

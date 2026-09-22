@@ -1514,7 +1514,7 @@ public class TypeCheckerTests
         const string source = """
             struct Person { age: Int }
 
-            export(c) function readAge(p: owned Person): Int { return p.age; }
+            export abi(c) function readAge(p: owned Person): Int { return p.age; }
             """;
 
         var (unit, _, checker, diagnostics) = Setup(source);
@@ -1529,7 +1529,7 @@ public class TypeCheckerTests
         const string source = """
             struct Person { age: Int }
 
-            export(c) function readAge(p: unmanaged Person): Int { return p.age; }
+            export abi(c) function readAge(p: unmanaged Person): Int { return p.age; }
             """;
 
         var (unit, _, checker, diagnostics) = Setup(source);
@@ -1544,7 +1544,7 @@ public class TypeCheckerTests
         const string source = """
             struct Person { age: Int }
 
-            import(c) function makePerson(): owned Person;
+            abi(c) function makePerson(): owned Person;
             """;
 
         var (unit, _, checker, diagnostics) = Setup(source);
@@ -1556,7 +1556,7 @@ public class TypeCheckerTests
     [Fact]
     public void Import_function_with_a_primitive_signature_type_checks_cleanly()
     {
-        var (unit, _, checker, diagnostics) = Setup("import function abs(n: Int32): Int32;");
+        var (unit, _, checker, diagnostics) = Setup("function abs(n: Int32): Int32;");
         var functionType = CheckFunction(checker, unit);
 
         Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
@@ -1928,7 +1928,7 @@ public class TypeCheckerTests
         // C-interop pattern (pass a string literal straight into puts()/strlen()) that must keep working.
         const string source = """
             type CString = unmanaged [Int8];
-            import function puts(str: CString);
+            function puts(str: CString);
             function f() {
                 puts("stijn");
             }
@@ -1973,7 +1973,7 @@ public class TypeCheckerTests
     {
         const string source = """
             type CString = unmanaged [Int8];
-            import function puts(str: CString);
+            function puts(str: CString);
             """;
 
         var (unit, _, checker, diagnostics) = Setup(source);
@@ -1987,7 +1987,7 @@ public class TypeCheckerTests
     {
         const string source = """
             opaque type CString = unmanaged [Int8];
-            import(c) function puts(str: CString);
+            abi(c) function puts(str: CString);
             """;
 
         var (unit, _, checker, diagnostics) = Setup(source);
@@ -2005,7 +2005,7 @@ public class TypeCheckerTests
         const string source = """
             struct Person { age: Int }
 
-            import function makePerson(): owned Person;
+            function makePerson(): owned Person;
             """;
 
         var (unit, _, checker, diagnostics) = Setup(source);
@@ -2031,7 +2031,7 @@ public class TypeCheckerTests
     [Fact]
     public void Export_c_with_a_default_unowned_array_parameter_is_a_diagnostic()
     {
-        const string source = "export(c) function concat(a: [Int8], b: [Int8]): Int { return a.length; }";
+        const string source = "export abi(c) function concat(a: [Int8], b: [Int8]): Int { return a.length; }";
 
         var (unit, _, checker, diagnostics) = Setup(source);
         checker.VisitFunction((KokosFunctionNode)unit.Members[0]);

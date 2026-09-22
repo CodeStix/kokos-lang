@@ -22,19 +22,26 @@ public sealed unsafe class KokosJit : IDisposable
     /// usual ownership rules, once a module is wrapped as a thread-safe module and handed to the
     /// JIT, the JIT owns it. Neither should be disposed by the caller afterward.
     ///
-    /// Runs the module's static-variable initializers (<see cref="KokosCodeGenerator.StaticInitializerFunctionName"/>)
-    /// exactly once, right here, before returning — every module always has this function (an empty
-    /// <c>{ ret void }</c> when there are no `static let` initializers at all), so this is always safe
-    /// and needs no cooperation from any caller: static initialization now unconditionally happens
-    /// before any other compiled function can possibly run.
+    /// Runs <paramref name="moduleInitializerFunctionName"/> — this module's own static-variable
+    /// initializer (see <see cref="KokosCodeGenerator.StaticInitializerFunctionName"/>, mangled by its
+    /// own module name so it can never collide with another compiled module's own initializer) —
+    /// exactly once, right here, before returning. Every module always has this function (an empty
+    /// <c>{ ret void }</c> when there are no `static let` initializers at all), so this is always safe.
     ///
     /// <paramref name="libraryPaths"/> (if given) are loaded — see <see cref="LoadLibrary"/> — before
-    /// that initializer lookup, not after: ORC compiles a whole thread-safe module together the first
-    /// time *any* symbol from it is requested, so an `import function` resolving to one of these
-    /// libraries must already be resolvable by the time this method's own internal lookup runs, not
-    /// just by the time the caller gets a `KokosJit` back to call <see cref="LoadLibrary"/> on.
+    /// any initializer lookup, not after: ORC compiles a whole thread-safe module together the first
+    /// time *any* symbol from it is requested, so a body-less declaration resolving to one of these
+    /// libraries must already be resolvable by the time any lookup below runs, not just by the time the
+    /// caller gets a `KokosJit` back to call <see cref="LoadLibrary"/> on. Each loaded library's own
+    /// initializer (named the same way, from its own file name — e.g. `--library mathlib.dll` implies
+    /// `mathlib.kokos.init_statics`) is then called too, best-effort: a plain native library that isn't
+    /// itself Kokos-compiled simply won't have one, which is not an error.
     /// </summary>
-    public static KokosJit Create(LLVMModuleRef module, LLVMContextRef context, IEnumerable<string>? libraryPaths = null)
+    public static KokosJit Create(
+        LLVMModuleRef module,
+        LLVMContextRef context,
+        string moduleInitializerFunctionName,
+        IEnumerable<string>? libraryPaths = null)
     {
         KokosNativeTarget.EnsureInitialized();
 
@@ -55,12 +62,13 @@ public sealed unsafe class KokosJit : IDisposable
         if (libraryPaths is not null)
         {
             foreach (var libraryPath in libraryPaths)
+            {
                 result.LoadLibrary(libraryPath);
+                result.TryCallInitializer($"{Path.GetFileNameWithoutExtension(libraryPath)}.kokos.init_statics");
+            }
         }
 
-        var initLookupError = jit.Lookup(out var initAddress, KokosCodeGenerator.StaticInitializerFunctionName);
-        ThrowIfError(initLookupError, $"looking up '{KokosCodeGenerator.StaticInitializerFunctionName}'");
-        Marshal.GetDelegateForFunctionPointer<Action>(new IntPtr(unchecked((long)initAddress)))();
+        result.CallInitializer(moduleInitializerFunctionName);
 
         return result;
     }
@@ -82,8 +90,8 @@ public sealed unsafe class KokosJit : IDisposable
     }
 
     /// <summary>
-    /// Loads a native library (a DLL on Windows) into the JIT's symbol search path, so an
-    /// `import function` declaration whose implementation lives in that library — rather than
+    /// Loads a native library (a DLL on Windows) into the JIT's symbol search path, so a body-less
+    /// function declaration whose implementation lives in that library — rather than
     /// already loaded into this .NET host process, unlike <see cref="AddProcessSymbolGenerator"/>'s
     /// process-wide symbols — resolves correctly. Safe to call more than once to load several
     /// libraries. Prefer passing every library a module needs to <see cref="Create"/> up front rather
@@ -116,6 +124,34 @@ public sealed unsafe class KokosJit : IDisposable
         ThrowIfError(lookupError, $"looking up '{name}'");
 
         return Marshal.GetDelegateForFunctionPointer<T>(new IntPtr(unchecked((long)address)));
+    }
+
+    /// <summary>Looks up and calls <paramref name="name"/> as a niladic void function — used for a module-initializer symbol that's required to exist.</summary>
+    private void CallInitializer(string name)
+    {
+        var error = _jit.Lookup(out var address, name);
+        ThrowIfError(error, $"looking up '{name}'");
+        Marshal.GetDelegateForFunctionPointer<Action>(new IntPtr(unchecked((long)address)))();
+    }
+
+    /// <summary>
+    /// Same as <see cref="CallInitializer"/>, but silently does nothing if <paramref name="name"/>
+    /// doesn't resolve — used for a loaded library's own initializer, which only exists if that library
+    /// was itself Kokos-compiled; a plain native library not having one is expected, not an error.
+    /// </summary>
+    private void TryCallInitializer(string name)
+    {
+        var error = _jit.Lookup(out var address, name);
+        if (error != default)
+        {
+            // Every LLVMErrorRef must be consumed exactly once even when discarded — GetErrorMessage
+            // both extracts the message and frees the underlying error object.
+            var messagePtr = LLVM.GetErrorMessage((LLVMOpaqueError*)error);
+            LLVM.DisposeErrorMessage(messagePtr);
+            return;
+        }
+
+        Marshal.GetDelegateForFunctionPointer<Action>(new IntPtr(unchecked((long)address)))();
     }
 
     private static void ThrowIfError(LLVMErrorRef error, string action)

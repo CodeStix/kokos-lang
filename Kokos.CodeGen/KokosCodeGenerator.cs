@@ -28,13 +28,6 @@ namespace Kokos.CodeGen;
 public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
 {
     /// <summary>
-    /// The synthesized static-initializer function's symbol name — shared with <see cref="KokosJit.Create"/>,
-    /// which looks it up and calls it once before returning. A `.` can never appear in a Kokos
-    /// identifier, so this is guaranteed collision-free with any user-declared function.
-    /// </summary>
-    public const string StaticInitializerFunctionName = "kokos.init_statics";
-
-    /// <summary>
     /// The name of the small, `noinline` wrapper every compiler-inserted release goes through instead
     /// of calling `@free` directly — see <see cref="EmitRelease"/>'s doc comment for why this exists.
     /// A `.` can never appear in a Kokos identifier, so this is guaranteed collision-free.
@@ -46,6 +39,19 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     private readonly KokosLlvmTypeMapper _typeMapper;
     private readonly LLVMModuleRef _module;
     private readonly LLVMBuilderRef _builder;
+    private readonly string _moduleName;
+
+    /// <summary>
+    /// The synthesized static-initializer function's symbol name — shared with <see cref="KokosJit.Create"/>,
+    /// which looks it up and calls it once before returning. Mangled by this compiled unit's own module
+    /// name (the same name passed into this generator's constructor, and the same name Program.cs
+    /// derives from the compiled folder/file) rather than a fixed constant — every separately-compiled
+    /// Kokos object used to emit this exact symbol unprefixed, which collided the moment two such
+    /// objects were linked/loaded together (e.g. a library DLL plus the executable consuming it). An
+    /// application can never link two modules sharing the same name, so this is guaranteed
+    /// collision-free without needing any finer (e.g. per-namespace) granularity.
+    /// </summary>
+    public string StaticInitializerFunctionName => $"{_moduleName}.kokos.init_statics";
 
     private Dictionary<string, (LLVMValueRef Pointer, LLVMTypeRef Type, KokosOwnershipKind Ownership, KokosType KokosType)> _scope = new();
 
@@ -104,6 +110,7 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     {
         _table = table;
         _checker = checker;
+        _moduleName = moduleName;
         Context = LLVMContextRef.Create();
         _typeMapper = new KokosLlvmTypeMapper(Context);
         _module = Context.CreateModuleWithName(moduleName);
@@ -207,9 +214,9 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         foreach (var function in functions)
             DeclareFunction(function);
 
-        // An `import function` has no body — DeclareFunction alone already produces a correct extern
-        // declaration for it (the same shape as the hand-declared malloc/free/abort), and KokosJit's
-        // process-symbol generator resolves it against the host process at JIT time.
+        // A body-less function declaration has no body — DeclareFunction alone already produces a
+        // correct extern declaration for it (the same shape as the hand-declared malloc/free/abort),
+        // and KokosJit's process-symbol generator resolves it against the host process at JIT time.
         foreach (var function in functions)
         {
             if (function.Body is not null)
@@ -301,16 +308,39 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
     }
 
     /// <summary>
+    /// Global namespace (null) leaves <paramref name="name"/> unmangled; otherwise mangles it as
+    /// <c>"{Namespace}.{Name}"</c>.
+    /// </summary>
+    private static string Mangle(string? @namespace, string name) => @namespace is null ? name : $"{@namespace}.{name}";
+
+    /// <summary>
+    /// A function's real LLVM symbol. <c>abi(c)</c> keeps its raw, literal name always — real C interop
+    /// (<c>puts</c>, <c>malloc</c>, ...) needs to match the actual C symbol exactly. Every other
+    /// (Kokos-ABI) function is mangled by its own declared <c>module</c> namespace
+    /// (<see cref="KokosDeclarationTable.ContextOf"/>) — this is what lets two different namespaces
+    /// each declare a function with the same short name without colliding once compiled, and matches
+    /// the identical <c>(namespace, name)</c> pair a downstream compile re-derives from this function's
+    /// own generated header (see <see cref="Formatting.KokosHeaderEmitter"/>), so nothing there needs
+    /// to change for this to resolve correctly across a compiled-object boundary.
+    ///
+    /// Public so a caller driving <see cref="KokosJit.GetFunction{T}"/> directly (e.g.
+    /// <c>Kokos/Program.cs</c> looking up a namespaced <c>main</c> to run) can compute the right symbol
+    /// to look up instead of assuming the bare Kokos name always matches the compiled one.
+    /// </summary>
+    public string GetFunctionSymbolName(KokosFunctionNode node) =>
+        node.IsCAbi ? node.Name : Mangle(_table.ContextOf(node).Namespace, node.Name);
+
+    /// <summary>
     /// Only an <c>export</c>-marked function is a real public symbol of this module — every other
     /// function it defines (including a plain helper with no modifier) is an internal implementation
-    /// detail and gets `internal` linkage so it isn't visible from outside. An <c>import</c> function
-    /// has no body at all (a pure declaration referring to a symbol defined elsewhere); its linkage
+    /// detail and gets `internal` linkage so it isn't visible from outside. A function with no body has
+    /// no definition at all (a pure declaration referring to a symbol defined elsewhere); its linkage
     /// stays the default `external` so it can still bind to that real symbol.
     /// </summary>
     private LLVMValueRef DeclareFunction(KokosFunctionNode node)
     {
         var llvmFunctionType = MapFunctionSignature(_checker.FunctionTypes[node]);
-        var function = _module.AddFunction(node.Name, llvmFunctionType);
+        var function = _module.AddFunction(GetFunctionSymbolName(node), llvmFunctionType);
 
         if (node.Body is not null && !node.IsExported)
             function.Linkage = LLVMLinkage.LLVMInternalLinkage;
@@ -318,11 +348,11 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         return function;
     }
 
-    /// <summary>Only ever called for a function with a real body (an `import function` is declared, never defined) — see <see cref="VisitCompilationUnit"/>.</summary>
+    /// <summary>Only ever called for a function with a real body (a body-less declaration is declared, never defined) — see <see cref="VisitCompilationUnit"/>.</summary>
     private void DefineFunctionBody(KokosFunctionNode node)
     {
-        var body = node.Body ?? throw new InvalidOperationException($"'{node.Name}' has no body to define — this is an import-only declaration.");
-        var function = _module.GetNamedFunction(node.Name);
+        var body = node.Body ?? throw new InvalidOperationException($"'{node.Name}' has no body to define — this is an extern-only declaration.");
+        var function = _module.GetNamedFunction(GetFunctionSymbolName(node));
         var functionType = _checker.FunctionTypes[node];
 
         var outerScope = _scope;
@@ -396,7 +426,7 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         DeclareFunction(node);
         if (node.Body is not null)
             DefineFunctionBody(node);
-        return _module.GetNamedFunction(node.Name);
+        return _module.GetNamedFunction(GetFunctionSymbolName(node));
     }
 
     // --- Statements --------------------------------------------------------------------------------
@@ -1443,7 +1473,7 @@ public sealed class KokosCodeGenerator : IKokosVisitor<LLVMValueRef>
         }
 
         var calleeFunctionType = _checker.FunctionTypes[calleeDecl];
-        var callee = _module.GetNamedFunction(calleeIdentifier.Name);
+        var callee = _module.GetNamedFunction(GetFunctionSymbolName(calleeDecl));
         var calleeLlvmType = MapFunctionSignature(calleeFunctionType);
 
         var args = new LLVMValueRef[node.Arguments.Items.Count];

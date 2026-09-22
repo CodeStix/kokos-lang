@@ -37,6 +37,7 @@ public enum TokenKind
     ExportKeyword,
     ModuleKeyword,
     VoidKeyword,
+    AbiKeyword,
 
     // Punctuation
     OpenParen,

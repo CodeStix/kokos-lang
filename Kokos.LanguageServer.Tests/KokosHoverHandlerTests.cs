@@ -161,7 +161,7 @@ public class KokosHoverHandlerTests
         const string source = """
             type CString = unmanaged [Int8];
 
-            import function puts(str: CString);
+            function puts(str: CString);
             """;
 
         var line = source.Split('\n').ToList().FindIndex(l => l.Contains("puts"));

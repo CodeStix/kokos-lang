@@ -90,9 +90,9 @@ public class HeaderEmitterTests
 
             type String = [Int8];
 
-            import function concat(a: unowned String, b: unowned String): owned String;
+            function concat(a: unowned String, b: unowned String): owned String;
 
-            import function lowercase(a: unowned String): owned String;
+            function lowercase(a: unowned String): owned String;
 
             struct Person {
                 age: Int
@@ -112,7 +112,7 @@ public class HeaderEmitterTests
             """);
 
         Assert.True(KokosHeaderEmitter.TryBuildHeader(unit, checker, out var headerText));
-        Assert.Contains("import function pub(): Int;", headerText);
+        Assert.Contains("function pub(): Int;", headerText);
         Assert.DoesNotContain("priv", headerText);
     }
 
@@ -138,12 +138,12 @@ public class HeaderEmitterTests
     }
 
     [Fact]
-    public void An_exported_c_abi_function_keeps_its_abi_marker_as_import_c()
+    public void An_exported_c_abi_function_keeps_its_abi_c_marker()
     {
-        var (unit, checker) = Parse("export(c) function puts(str: unmanaged [Int8]): Int { return 0; }");
+        var (unit, checker) = Parse("export abi(c) function puts(str: unmanaged [Int8]): Int { return 0; }");
 
         Assert.True(KokosHeaderEmitter.TryBuildHeader(unit, checker, out var headerText));
-        Assert.Equal("import(c) function puts(str: unmanaged [Int8]): Int;\n", headerText);
+        Assert.Equal("abi(c) function puts(str: unmanaged [Int8]): Int;\n", headerText);
     }
 
     [Fact]
@@ -204,7 +204,7 @@ public class HeaderEmitterTests
 
         var reparsed = KokosParser.Parse(headerText, out var diagnostics);
         Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
-        Assert.Equal(4, reparsed.Members.Count); // module decl + type alias + import function + struct
+        Assert.Equal(4, reparsed.Members.Count); // module decl + type alias + function + struct
     }
 
     [Fact]
@@ -216,7 +216,7 @@ public class HeaderEmitterTests
         var (unit, checker) = Parse("export function f() { return 1; }");
 
         Assert.True(KokosHeaderEmitter.TryBuildHeader(unit, checker, out var headerText));
-        Assert.Equal("import function f(): Int;\n", headerText);
+        Assert.Equal("function f(): Int;\n", headerText);
     }
 
     [Fact]
@@ -234,7 +234,7 @@ public class HeaderEmitterTests
             """);
 
         Assert.True(KokosHeaderEmitter.TryBuildHeader(unit, checker, out var headerText));
-        Assert.Contains("import function makePerson(): owned Person;", headerText);
+        Assert.Contains("function makePerson(): owned Person;", headerText);
     }
 
     [Fact]
@@ -243,7 +243,7 @@ public class HeaderEmitterTests
         var (unit, checker) = Parse("export function f() { }");
 
         Assert.True(KokosHeaderEmitter.TryBuildHeader(unit, checker, out var headerText));
-        Assert.Equal("import function f(): void;\n", headerText);
+        Assert.Equal("function f(): void;\n", headerText);
     }
 
     [Fact]
@@ -265,7 +265,7 @@ public class HeaderEmitterTests
 
             type Vector3 = value (Int, Int, Int);
 
-            import function main(): void;
+            function main(): void;
 
             """,
             headerText);
@@ -334,6 +334,6 @@ public class HeaderEmitterTests
         Assert.False(diagnostics.HasErrors, string.Join("\n", diagnostics));
 
         Assert.True(KokosHeaderEmitter.TryBuildHeader(consumerUnit, checker, out var headerText));
-        Assert.Contains("import function useShared(s: unowned Shared)", headerText);
+        Assert.Contains("function useShared(s: unowned Shared)", headerText);
     }
 }
