@@ -1,0 +1,39 @@
+module TestModule.String;
+
+export type String = readonly [Int8];
+
+export type CString = unmanaged [Int8];
+
+import(c) function puts(str: CString);
+import(c) function gets(str: CString);
+
+export function print(str: String) {
+    puts(str);
+}
+
+export function input() {
+    let str = [0i8 # 256];
+    gets(str);
+    return str;
+}
+
+export function concat(a: String, b: String) {
+
+    let totalLen = a.length + b.length + 1;
+
+    let l: Int8 = 0;
+    let newStr = [l # totalLen];
+
+    let i = 0;
+    while i < a.length {
+        newStr[i] = a[i];
+        i = i + 1;
+    }
+    i = 0;
+    while i < b.length {
+        newStr[a.length + i] = b[i];
+        i = i + 1;
+    }
+
+    return newStr;
+}

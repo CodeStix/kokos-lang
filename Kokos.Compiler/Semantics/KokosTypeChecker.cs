@@ -286,6 +286,183 @@ public sealed class KokosTypeChecker : IKokosVisitor<KokosType>
         return KokosUnknownType.Instance;
     }
 
+    /// <summary>
+    /// Every type an exported declaration's signature mentions must itself be resolvable from a
+    /// generated header (see <see cref="Formatting.KokosHeaderEmitter"/>) — a header that names a type
+    /// nobody else's header ever defines is unusable by a downstream compilation. So: a struct/enum/
+    /// type-alias reachable from an exported function's parameters/return, an exported struct's
+    /// fields, an exported enum's variant payloads, or an exported type-alias's own definition must
+    /// itself be <c>export</c>-marked too, *if* it's declared in the same namespace ("module") as the
+    /// exporting declaration — a reference to a type from a different namespace is that namespace's
+    /// own concern to export correctly, not this one's.
+    ///
+    /// Deliberately *not* run for every compilation — an ordinary `--run`-style program has no header
+    /// to keep valid, and requiring every type reachable from an exported `main` to itself be exported
+    /// would be pure friction with no payoff. Only <c>Kokos/Program.cs</c>'s <c>--emit-object</c> path
+    /// (where a header genuinely gets written) calls this, right after <see cref="VisitCompilationUnit"/>.
+    /// </summary>
+    public void ValidateExportedTypeVisibility(KokosCompilationUnitNode node)
+    {
+        foreach (var member in node.Members)
+        {
+            switch (member)
+            {
+                case KokosFunctionNode { IsExported: true } function:
+                {
+                    var saved = ActivateContext(function);
+                    try
+                    {
+                        foreach (var parameter in function.Parameters.Items)
+                            CheckExportedTypeReferences(parameter.Type, function);
+
+                        if (function.ReturnType is not null)
+                            CheckExportedTypeReferences(function.ReturnType, function);
+                        else
+                            CheckExportedTypeReference(GetFunctionType(function).ReturnType, function.NameToken.Span, function);
+                    }
+                    finally { RestoreContext(saved); }
+                    break;
+                }
+
+                case KokosStructDeclNode { IsExported: true } structDecl:
+                {
+                    var saved = ActivateContext(structDecl);
+                    try
+                    {
+                        foreach (var field in structDecl.Fields.Items)
+                            CheckExportedTypeReferences(field.Type, structDecl);
+                    }
+                    finally { RestoreContext(saved); }
+                    break;
+                }
+
+                case KokosEnumDeclNode { IsExported: true } enumDecl:
+                {
+                    var saved = ActivateContext(enumDecl);
+                    try
+                    {
+                        foreach (var variant in enumDecl.Variants.Items)
+                            if (variant.PayloadType is not null)
+                                CheckExportedTypeReferences(variant.PayloadType, enumDecl);
+                    }
+                    finally { RestoreContext(saved); }
+                    break;
+                }
+
+                case KokosTypeAliasNode { IsExported: true } alias:
+                {
+                    var saved = ActivateContext(alias);
+                    try
+                    {
+                        CheckExportedTypeReferences(alias.Type, alias);
+                    }
+                    finally { RestoreContext(saved); }
+                    break;
+                }
+            }
+        }
+    }
+
+    /// <summary>Walks a written type expression, checking every named reference it mentions via <see cref="CheckExportedTypeReference(string,TextSpan,KokosMemberNode)"/>.</summary>
+    private void CheckExportedTypeReferences(KokosTypeNode typeNode, KokosMemberNode owner)
+    {
+        switch (typeNode)
+        {
+            case KokosNamedTypeNode named:
+                CheckExportedTypeReference(named.Name, named.NameToken.Span, owner);
+                break;
+            case KokosOptionalTypeNode optional:
+                CheckExportedTypeReferences(optional.InnerType, owner);
+                break;
+            case KokosModifiedTypeNode modified:
+                CheckExportedTypeReferences(modified.InnerType, owner);
+                break;
+            case KokosArrayTypeNode array:
+                CheckExportedTypeReferences(array.ElementType, owner);
+                break;
+            case KokosFixedLengthArrayTypeNode fixedArray:
+                CheckExportedTypeReferences(fixedArray.ElementType, owner);
+                break;
+            case KokosUnionTypeNode union:
+                foreach (var unionMember in union.Members.Items)
+                    CheckExportedTypeReferences(unionMember, owner);
+                break;
+            case KokosTupleTypeNode tuple:
+                foreach (var field in tuple.Fields.Items)
+                    CheckExportedTypeReferences(field.Type, owner);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Same walk as <see cref="CheckExportedTypeReferences(KokosTypeNode,KokosMemberNode)"/>, but over
+    /// a *resolved* <see cref="KokosType"/> instead of written syntax — needed for an exported
+    /// function's inferred return type, which has no syntax node of its own to walk. Stops at a named
+    /// struct/enum/alias without descending into its own fields: if that named type is itself exported,
+    /// its own fields are independently required to be exported wherever it's processed as its own
+    /// member entry above; if it isn't, this call site already reports the diagnostic and there's
+    /// nothing more to learn by going deeper.
+    /// </summary>
+    private void CheckExportedTypeReference(KokosType type, TextSpan span, KokosMemberNode owner)
+    {
+        switch (type)
+        {
+            case KokosStructType { Name: { } name }:
+                CheckExportedTypeReference(name, span, owner);
+                break;
+            case KokosStructType unnamed:
+                foreach (var field in unnamed.Fields)
+                    CheckExportedTypeReference(field.Type, span, owner);
+                break;
+            case KokosEnumType enumType:
+                CheckExportedTypeReference(enumType.Name, span, owner);
+                break;
+            case KokosAliasType aliasType:
+                CheckExportedTypeReference(aliasType.Name, span, owner);
+                break;
+            case KokosArrayType arrayType:
+                CheckExportedTypeReference(arrayType.ElementType, span, owner);
+                break;
+            case KokosOptionalType optionalType:
+                CheckExportedTypeReference(optionalType.InnerType, span, owner);
+                break;
+            case KokosUnionType unionType:
+                foreach (var unionMember in unionType.Members)
+                    CheckExportedTypeReference(unionMember, span, owner);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Reports an error when <paramref name="typeName"/> resolves to a struct/enum/type-alias declared
+    /// in <paramref name="owner"/>'s own namespace but isn't itself <c>export</c>-marked — see
+    /// <see cref="ValidateExportedTypeVisibility"/>. Silently returns for anything else (a primitive, an
+    /// undeclared name already diagnosed elsewhere, a function/static-variable name, an already-exported
+    /// type, or a type from a different namespace, which is that namespace's own concern).
+    /// </summary>
+    private void CheckExportedTypeReference(string typeName, TextSpan span, KokosMemberNode owner)
+    {
+        if (!_table.TryGetMember(typeName, out var referenced))
+            return;
+
+        var isExported = referenced switch
+        {
+            KokosStructDeclNode structDecl => structDecl.IsExported,
+            KokosEnumDeclNode enumDecl => enumDecl.IsExported,
+            KokosTypeAliasNode alias => alias.IsExported,
+            _ => true,
+        };
+
+        if (isExported)
+            return;
+
+        if (_table.ContextOf(referenced).Namespace != _table.ContextOf(owner).Namespace)
+            return;
+
+        _diagnostics.ReportError(span,
+            $"'{typeName}' is used by an exported declaration here but isn't itself marked 'export' — add 'export' to '{typeName}' too.");
+    }
+
     public KokosType VisitFunction(KokosFunctionNode node) => GetFunctionType(node);
 
     public KokosType VisitStaticVarDecl(KokosStaticVarDeclNode node)

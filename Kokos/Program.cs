@@ -83,6 +83,11 @@ internal class Program
         var unit = new KokosCompilationUnitNode(units.SelectMany(u => u.Members).ToList(), units[^1].EndOfFileToken);
         checker.VisitCompilationUnit(unit);
 
+        // Only meaningful when a header will actually be written (see KokosTypeChecker's own doc
+        // comment on this method) — an ordinary run has no header to keep valid.
+        if (emitObjectPath is not null)
+            checker.ValidateExportedTypeVisibility(unit);
+
         if (diagnostics.Any())
         {
             Console.WriteLine("=== Diagnostics ===");
@@ -149,7 +154,7 @@ internal class Program
             {
                 KokosObjectEmitter.EmitObjectFile(module, emitObjectPath);
                 Console.WriteLine($"=== Wrote object file: {emitObjectPath} ===");
-                EmitHeaders(units, emitObjectPath);
+                EmitHeaders(units, checker, emitObjectPath);
                 return 0;
             }
 
@@ -208,13 +213,13 @@ internal class Program
     /// object file itself. A unit that exports nothing is silently skipped — no header, nothing to
     /// link against from outside anyway.
     /// </summary>
-    private static void EmitHeaders(IReadOnlyList<KokosCompilationUnitNode> units, string emitObjectPath)
+    private static void EmitHeaders(IReadOnlyList<KokosCompilationUnitNode> units, KokosTypeChecker checker, string emitObjectPath)
     {
         var headerRoot = Path.GetDirectoryName(Path.GetFullPath(emitObjectPath)) ?? ".";
 
         foreach (var unit in units)
         {
-            if (!KokosHeaderEmitter.TryBuildHeader(unit, out var headerText))
+            if (!KokosHeaderEmitter.TryBuildHeader(unit, checker, out var headerText))
                 continue;
 
             var headerPath = Path.Combine(headerRoot, unit.SourceFile ?? $"{Path.GetFileNameWithoutExtension(emitObjectPath)}.kokos");

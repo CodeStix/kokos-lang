@@ -137,6 +137,9 @@ public sealed class KokosDeclarationTable
         return false;
     }
 
+    /// <summary>Kind-agnostic lookup — used where the caller only needs to know *what* a name resolves to (e.g. checking a referenced type's own export status) rather than a specific declaration kind.</summary>
+    public bool TryGetMember(string name, out KokosMemberNode node) => TryGetAs(name, out node);
+
     public bool TryGetTypeAlias(string name, out KokosTypeAliasNode node) => TryGetAs(name, out node);
     public bool TryGetEnum(string name, out KokosEnumDeclNode node) => TryGetAs(name, out node);
     public bool TryGetStruct(string name, out KokosStructDeclNode node) => TryGetAs(name, out node);

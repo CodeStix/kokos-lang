@@ -1,3 +1,4 @@
+using Kokos.Compiler.Semantics;
 using Kokos.Compiler.Syntax.Nodes;
 
 namespace Kokos.Compiler.Formatting;
@@ -31,7 +32,7 @@ public static class KokosHeaderEmitter
     /// left empty) when it exports nothing at all — the caller (see <c>Kokos/Program.cs</c>) skips
     /// writing a header file for those, per "each source file that exports something."
     /// </summary>
-    public static bool TryBuildHeader(KokosCompilationUnitNode unit, out string headerText)
+    public static bool TryBuildHeader(KokosCompilationUnitNode unit, KokosTypeChecker checker, out string headerText)
     {
         var hasExportedMember = unit.Members.Any(IsExportedMember);
         if (!hasExportedMember)
@@ -53,7 +54,7 @@ public static class KokosHeaderEmitter
             switch (member)
             {
                 case KokosFunctionNode { IsExported: true } function:
-                    sections.Add(FormatFunctionAsImportDeclaration(function, formatter));
+                    sections.Add(FormatFunctionAsImportDeclaration(function, formatter, checker));
                     break;
 
                 case KokosTypeAliasNode { IsExported: true } or KokosEnumDeclNode { IsExported: true } or KokosStructDeclNode { IsExported: true }:
@@ -81,11 +82,36 @@ public static class KokosHeaderEmitter
     /// whether the source used a plain `export` or `export(c)` — the ABI marker (if any) carries over
     /// unchanged, since it describes the calling convention, not who's exporting vs. importing it.
     /// </summary>
-    private static string FormatFunctionAsImportDeclaration(KokosFunctionNode node, KokosFormatter formatter)
+    private static string FormatFunctionAsImportDeclaration(KokosFunctionNode node, KokosFormatter formatter, KokosTypeChecker checker)
     {
         var abi = node.AbiNameToken is null ? "" : $"({node.AbiNameToken.Text})";
         var parameters = string.Join(", ", node.Parameters.Items.Select(p => p.Accept(formatter)));
-        var returnType = node.ReturnType is null ? "" : $": {node.ReturnType.Accept(formatter)}";
-        return $"import{abi} function {node.Name}({parameters}){returnType};";
+        return $"import{abi} function {node.Name}({parameters}): {FormatReturnType(node, formatter, checker)};";
+    }
+
+    /// <summary>
+    /// A header's `import function` declaration always states its return type explicitly, even when
+    /// the original source left it to inference — the header is all a downstream compilation ever
+    /// sees, and inference has nothing to run there (there's no body). When the source did write a
+    /// return type, that written syntax is reused verbatim; otherwise it's rebuilt from the checker's
+    /// own resolved signature (<see cref="KokosTypeChecker.FunctionTypes"/>, always populated by the
+    /// time headers are emitted — see <c>Kokos/Program.cs</c>), including whatever ownership/`readonly`
+    /// modifier the checker positionally defaulted it to.
+    /// </summary>
+    private static string FormatReturnType(KokosFunctionNode node, KokosFormatter formatter, KokosTypeChecker checker)
+    {
+        if (node.ReturnType is not null)
+            return node.ReturnType.Accept(formatter);
+
+        var functionType = checker.FunctionTypes[node];
+        var modifiers = (functionType.ReturnReadOnly ? "readonly " : "") + functionType.ReturnOwnership switch
+        {
+            KokosOwnershipKind.Owned => "owned ",
+            KokosOwnershipKind.Unowned => "unowned ",
+            KokosOwnershipKind.Manual => "manual ",
+            KokosOwnershipKind.Unmanaged => "unmanaged ",
+            _ => "",
+        };
+        return $"{modifiers}{functionType.ReturnType.DisplayName}";
     }
 }

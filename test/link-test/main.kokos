@@ -1,0 +1,9 @@
+import TestModule.String;
+
+export function add(a: Int, b: Int) {
+    return a + b;
+}
+
+export function main() {
+
+}

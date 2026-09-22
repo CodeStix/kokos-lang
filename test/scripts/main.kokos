@@ -1,0 +1,13 @@
+module TestModule.Oof;
+
+import TestModule.String;
+
+
+export function main() {
+
+    print("please input your name: ");
+
+    let input = input();
+
+    print(concat("your name is: ", input));
+}
